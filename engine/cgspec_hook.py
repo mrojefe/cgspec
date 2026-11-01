@@ -75,7 +75,19 @@ def pre_tool(root: Path, tool: str, raw: str) -> int:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             raise ValueError("payload is not a JSON object")
+        tool_name = payload.get("tool_name") or payload.get("tool") or ""
+        if "invoke_subagent" in tool_name:
+            from _lib import quota
+            params = payload.get("parameters") or {}
+            pre = quota.evaluate_subagent_preflight(quota.snapshot(root), params.get("Model"))
+            if not pre.get("allowed", True):
+                fb = f" (fallback: {pre['fallback_model']})" if pre.get("fallback_model") else ""
+                return block(tool, f"CGSpec Quota Pre-flight: {pre.get('reason')}{fb}")
         call = normalize(payload, tool)
+        from _lib import quota
+        q_snap = quota.snapshot(root)
+        if q_snap.get("mode") == "emergency" and call.get("kind") in ("write", "shell"):
+            return block(tool, f"CGSpec Quota Emergency Stop active ({q_snap.get('remaining_pct')}% remaining)")
         # The witness key is outside the checkout. Ordinary edit/shell tools must
         # not manufacture receipts or inspect the witness to forge their MACs.
         coverage_paths = ("hook-heartbeats", "cgspec-hook-witness-")
@@ -186,6 +198,10 @@ def lifecycle(root: Path, event: str, args: argparse.Namespace, raw: str = "") -
     if event == "user-message":
         try:
             inbox.record(root, tool=args.tool, raw=raw)
+            from _lib import quota
+            adv = quota.evaluate_assistant_prompt(quota.snapshot(root))
+            if adv.get("warning"):
+                print(f"CGSpec Advisory: {adv['warning']}", file=sys.stderr)
         except Exception as exc:  # never block the user's message
             print(f"cgspec_hook: inbox capture failed: {exc!r}", file=sys.stderr)
         return EXIT_OK
