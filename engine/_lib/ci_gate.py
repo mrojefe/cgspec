@@ -280,11 +280,13 @@ def check_issue_linking(root: Path, base: str, pr: str | None,
     if not credential:
         return ["cannot verify issue linking: GH_TOKEN or GITHUB_TOKEN with issues: read is required"], []
     try:
-        if any(issue_linking.existing_issue(repository, number, credential) for number in sorted(references)):
+        if any(issue_linking.existing_issue(repository, owner, number, credential)
+               for owner, number in sorted(references)):
             return [], ["verified PR-to-issue reference against an existing issue"]
     except RuntimeError as exc:
         return [f"cannot verify issue linking: {exc}; check issues: read permission and API access"], []
-    return [f"no referenced existing issue in {repository} (references: {', '.join('#' + str(n) for n in sorted(references))})"], []
+    labels = ", ".join(f"{owner}#{number}" for owner, number in sorted(references))
+    return [f"no referenced existing issue in {repository} (references: {labels})"], []
 
 
 def run(root: Path, base: str | None, rerun_tests: bool = True,

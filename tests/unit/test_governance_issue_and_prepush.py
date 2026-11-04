@@ -35,8 +35,11 @@ class IssueLinkingGateTests(unittest.TestCase):
         class IssueHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 number = self.path.rsplit("/", 1)[-1]
-                if self.path.startswith("/repos/BeOjefe/cgspec/issues/") and number in ("76", "77"):
-                    body = {"number": int(number)}
+                repo = self.path.removeprefix("/repos/").rsplit("/issues/", 1)[0]
+                if repo in ("BeOjefe/cgspec", "mrojefe/cgspec", "other/cgspec") and number in ("76", "77"):
+                    canonical = "other/cgspec" if repo == "other/cgspec" else "mrojefe/cgspec"
+                    body = {"number": int(number),
+                            "repository_url": f"http://127.0.0.1:{self.server.server_port}/repos/{canonical}"}
                     if number == "77":
                         body["pull_request"] = {"url": "https://example.invalid/pr/77"}
                     payload = json.dumps(body).encode()
@@ -54,7 +57,7 @@ class IssueLinkingGateTests(unittest.TestCase):
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), IssueHandler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
-        os.environ.update({"GITHUB_REPOSITORY": "BeOjefe/cgspec",
+        os.environ.update({"GITHUB_REPOSITORY": "mrojefe/cgspec",
                            "GITHUB_API_URL": f"http://127.0.0.1:{self._server.server_port}",
                            "GH_TOKEN": "fixture-token"})
         os.environ.pop("GITHUB_TOKEN", None)
@@ -188,6 +191,7 @@ class IssueLinkingGateTests(unittest.TestCase):
         commit(self.root, "fix: update logic")
         res = self.ci("--pr", "https://github.com/other/cgspec/issues/76")
         self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("no referenced existing issue in mrojefe/cgspec", res.stdout)
 
     def test_missing_token_and_api_errors_fail_closed(self):
         self.set_t0()

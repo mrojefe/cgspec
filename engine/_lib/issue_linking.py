@@ -29,26 +29,25 @@ def repository(root: Path) -> str | None:
     return match.group(1) if match else None
 
 
-def _references(text: str, repo: str) -> set[int]:
-    found: set[int] = set()
+def _references(text: str, repo: str) -> set[tuple[str, int]]:
+    found: set[tuple[str, int]] = set()
     covered: list[tuple[int, int]] = []
     for pattern in (ISSUE_URL_PATTERN, QUALIFIED_ISSUE_PATTERN):
         for match in pattern.finditer(text):
             if any(start <= match.start() < end for start, end in covered):
                 continue
             covered.append(match.span())
-            if f"{match.group(1)}/{match.group(2)}".casefold() == repo.casefold():
-                found.add(int(match.group(3)))
+            found.add((f"{match.group(1)}/{match.group(2)}", int(match.group(3))))
     for match in ISSUE_PATTERN.finditer(text):
         if any(start <= match.start() < end for start, end in covered):
             continue
         if re.search(r"(?i)\b(?:PR|pull request)\s*$", text[max(0, match.start() - 16):match.start()]):
             continue
-        found.add(int(next(group for group in match.groups() if group is not None)))
-    return {number for number in found if number > 0}
+        found.add((repo, int(next(group for group in match.groups() if group is not None))))
+    return {(owner, number) for owner, number in found if number > 0}
 
 
-def references(root: Path, commits: list[str], repo: str, pr: str | None = None) -> set[int]:
+def references(root: Path, commits: list[str], repo: str, pr: str | None = None) -> set[tuple[str, int]]:
     found = _references(pr or "", repo)
     for commit in commits:
         msg = git(root, "log", "-1", "--format=%B", commit).stdout
@@ -57,14 +56,14 @@ def references(root: Path, commits: list[str], repo: str, pr: str | None = None)
     if not branch or branch == "HEAD":
         branch = os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME") or ""
     if branch and branch not in ("main", "master"):
-        found.update(int(match.group(1) or match.group(2)) for match in BRANCH_ISSUE_PATTERN.finditer(branch))
+        found.update((repo, int(match.group(1) or match.group(2))) for match in BRANCH_ISSUE_PATTERN.finditer(branch))
     return found
 
 
-def existing_issue(repo: str, number: int, credential: str) -> bool:
+def existing_issue(target_repo: str, referenced_repo: str, number: int, credential: str) -> bool:
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
     request = urllib.request.Request(
-        f"{api}/repos/{repo}/issues/{number}",
+        f"{api}/repos/{referenced_repo}/issues/{number}",
         headers={"Authorization": f"Bearer {credential}", "Accept": "application/vnd.github+json"},
     )
     try:
@@ -78,4 +77,7 @@ def existing_issue(repo: str, number: int, credential: str) -> bool:
         raise RuntimeError(f"GitHub issue lookup unavailable: {type(exc).__name__}") from exc
     if not isinstance(issue, dict) or issue.get("number") != number:
         raise RuntimeError("GitHub issue lookup returned an invalid response")
-    return "pull_request" not in issue
+    canonical = issue.get("repository_url")
+    if not isinstance(canonical, str):
+        raise RuntimeError("GitHub issue lookup omitted the repository identity")
+    return canonical.rstrip("/").casefold().endswith(f"/repos/{target_repo}".casefold()) and "pull_request" not in issue
