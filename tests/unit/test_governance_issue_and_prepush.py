@@ -30,7 +30,8 @@ class IssueLinkingGateTests(unittest.TestCase):
         git_project(self.root, profile="cli")
         self.base = head(self.root)
         self._saved_env = {key: os.environ.get(key) for key in
-                           ("GITHUB_REPOSITORY", "GITHUB_API_URL", "GH_TOKEN", "GITHUB_TOKEN")}
+                           ("GITHUB_REPOSITORY", "GITHUB_WORKSPACE", "GITHUB_EVENT_NAME",
+                            "GITHUB_API_URL", "GH_TOKEN", "GITHUB_TOKEN")}
 
         class IssueHandler(BaseHTTPRequestHandler):
             def do_GET(self):
@@ -58,6 +59,7 @@ class IssueLinkingGateTests(unittest.TestCase):
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         os.environ.update({"GITHUB_REPOSITORY": "mrojefe/cgspec",
+                           "GITHUB_WORKSPACE": str(self.root), "GITHUB_EVENT_NAME": "test",
                            "GITHUB_API_URL": f"http://127.0.0.1:{self._server.server_port}",
                            "GH_TOKEN": "fixture-token"})
         os.environ.pop("GITHUB_TOKEN", None)
