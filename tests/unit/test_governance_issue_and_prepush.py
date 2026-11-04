@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from tests.helpers import TempDir, git, git_project, hook, make_slice, run_script, set_test_command, write_json
@@ -27,8 +29,45 @@ class IssueLinkingGateTests(unittest.TestCase):
         self.root = self._tmp.__enter__()
         git_project(self.root, profile="cli")
         self.base = head(self.root)
+        self._saved_env = {key: os.environ.get(key) for key in
+                           ("GITHUB_REPOSITORY", "GITHUB_API_URL", "GH_TOKEN", "GITHUB_TOKEN")}
+
+        class IssueHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                number = self.path.rsplit("/", 1)[-1]
+                if self.path.startswith("/repos/BeOjefe/cgspec/issues/") and number in ("76", "77"):
+                    body = {"number": int(number)}
+                    if number == "77":
+                        body["pull_request"] = {"url": "https://example.invalid/pr/77"}
+                    payload = json.dumps(body).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+                self.send_response(int(number) if number in ("403", "429") else 404)
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), IssueHandler)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        os.environ.update({"GITHUB_REPOSITORY": "BeOjefe/cgspec",
+                           "GITHUB_API_URL": f"http://127.0.0.1:{self._server.server_port}",
+                           "GH_TOKEN": "fixture-token"})
+        os.environ.pop("GITHUB_TOKEN", None)
 
     def tearDown(self):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join()
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         self._tmp.__exit__(None, None, None)
 
     def ci(self, *extra: str):
@@ -126,13 +165,47 @@ class IssueLinkingGateTests(unittest.TestCase):
         self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
         self.assertIn("candidate PR or commit range has no associated issue reference", res.stdout)
 
-    def test_pr_metadata_with_numeric_id_only_passes(self):
+    def test_pr_metadata_with_numeric_id_only_fails(self):
         self.set_t0()
         (self.root / "src/a.ts").write_text("export const a = 2;\n")
         commit(self.root, "fix: update logic")
         res = self.ci("--pr", "76")
-        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
-        self.assertIn("verified PR-to-issue reference", res.stdout)
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("no associated issue reference", res.stdout)
+
+    def test_nonexistent_issue_and_pr_number_fail(self):
+        self.set_t0()
+        (self.root / "src/a.ts").write_text("export const a = 2;\n")
+        commit(self.root, "fix: update logic")
+        for reference in ("fixes #999999", "fixes #77", "PR #76"):
+            with self.subTest(reference=reference):
+                res = self.ci("--pr", reference)
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+
+    def test_wrong_repository_issue_url_fails(self):
+        self.set_t0()
+        (self.root / "src/a.ts").write_text("export const a = 2;\n")
+        commit(self.root, "fix: update logic")
+        res = self.ci("--pr", "https://github.com/other/cgspec/issues/76")
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+
+    def test_missing_token_and_api_errors_fail_closed(self):
+        self.set_t0()
+        (self.root / "src/a.ts").write_text("export const a = 2;\n")
+        commit(self.root, "fix: update logic")
+        os.environ.pop("GH_TOKEN")
+        res = self.ci("--pr", "fixes #76")
+        self.assertIn("GH_TOKEN or GITHUB_TOKEN", res.stdout)
+        os.environ["GH_TOKEN"] = "fixture-token"
+        for number in (403, 429):
+            with self.subTest(status=number):
+                res = self.ci("--pr", f"fixes #{number}")
+                self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+                self.assertIn(f"HTTP {number}", res.stdout)
+        os.environ["GITHUB_API_URL"] = "http://127.0.0.1:1"
+        res = self.ci("--pr", "fixes #76")
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("lookup unavailable", res.stdout)
 
     def test_branch_with_step_or_patch_number_fails_linking(self):
         git(self.root, "checkout", "-q", "-b", "refactor-step-1")
@@ -233,7 +306,7 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         ref_update = f"refs/heads/branch-to-delete {zero} refs/heads/branch-to-delete {self.base}\n"
         self.assertEqual(pre_push(self.root, ref_update), 0)
 
-    def test_pre_push_skip_env_var_bypasses_tests(self):
+    def test_pre_push_skip_env_var_cannot_bypass_tests(self):
         from _lib.local_approval_gate import pre_push
         self.set_project_config(test_command=["python3", "-c", "import sys; sys.exit(1)"])
         agents_file = self.root / "AGENTS.md"
@@ -242,9 +315,38 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         ref_update = f"refs/heads/codex/test-work {current_head} refs/heads/codex/test-work {self.base}\n"
         os.environ["CGSPEC_SKIP_PRE_PUSH_TESTS"] = "1"
         try:
-            self.assertEqual(pre_push(self.root, ref_update), 0)
+            self.assertEqual(pre_push(self.root, ref_update), 1)
         finally:
             os.environ.pop("CGSPEC_SKIP_PRE_PUSH_TESTS", None)
+
+    def test_pre_push_blocks_when_test_file_command_selects_none(self):
+        from _lib.local_approval_gate import pre_push
+        self.set_project_config(test_command=["python3", "{test_file}"])
+        current_head = commit(self.root, "docs: outgoing work")
+        ref_update = f"refs/heads/codex/test-work {current_head} refs/heads/codex/test-work {self.base}\n"
+        self.assertEqual(pre_push(self.root, ref_update), 1)
+
+    def test_pre_push_blocks_when_test_file_runner_selects_none(self):
+        from _lib.local_approval_gate import pre_push
+        self.set_project_config(test_command=None, test_runners=[{
+            "id": "unit", "command": ["python3", "{test_file}"],
+            "cwd": ".", "timeout_seconds": 30, "applies_to": ["tests/**"],
+        }])
+        current_head = commit(self.root, "docs: outgoing work")
+        ref_update = f"refs/heads/codex/test-work {current_head} refs/heads/codex/test-work {self.base}\n"
+        self.assertEqual(pre_push(self.root, ref_update), 1)
+
+    def test_pre_push_runner_does_not_select_unrelated_test_files(self):
+        from _lib.local_approval_gate import pre_push
+        self.set_project_config(test_command=None, test_runners=[{
+            "id": "unit", "command": ["python3", "{test_file}"],
+            "cwd": ".", "timeout_seconds": 30, "applies_to": ["tests/unit/**"],
+        }])
+        (self.root / "tests").mkdir(exist_ok=True)
+        (self.root / "tests/unrelated.py").write_text("pass\n")
+        current_head = commit(self.root, "test: unrelated test")
+        ref_update = f"refs/heads/codex/test-work {current_head} refs/heads/codex/test-work {self.base}\n"
+        self.assertEqual(pre_push(self.root, ref_update), 1)
 
     def test_pre_push_executes_test_runners_with_test_file_substitution(self):
         from _lib.local_approval_gate import pre_push

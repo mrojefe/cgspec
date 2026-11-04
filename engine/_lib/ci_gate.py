@@ -10,40 +10,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from . import checks
+from . import checks, issue_linking
 from .commit_gate import evaluate
 from .gitview import View, git
 
 TEST_TIMEOUT = 600
-
-ISSUE_PATTERN = re.compile(
-    r"(?:(?i:\b(?:closes|closed|fixes|fixed|resolves|resolved|issue)\b:?\s*)?#\d+\b|"
-    r"https?://[^/\s]+/[^/\s]+/[^/\s]+/issues/\d+\b|"
-    r"\b[a-zA-Z0-9_-]+#\d+\b|"
-    r"\b(?:GH|gh)-\d+\b|"
-    r"(?i:\b(?:closes|closed|fixes|fixed|resolves|resolved|issue)\s+\d+\b))"
-)
-BRANCH_ISSUE_PATTERN = re.compile(
-    r"(?i)(?:^|[/-])(?:(?:issue|gh)[-/]?|#|(?:fix|fixes|feat|feature)[-/]#?)(\d+)(?:[/-]|$)|"
-    r"^(?:[a-zA-Z0-9_-]+/)?(\d+)(?:[/-]|$)"
-)
-
-
-def has_issue_reference(root: Path, base: str, pr: str | None = None) -> bool:
-    if pr:
-        if ISSUE_PATTERN.search(pr) or (pr.strip().isdigit() and int(pr.strip()) > 0):
-            return True
-    for commit in commits_in_range(root, base):
-        msg = git(root, "log", "-1", "--format=%B", commit).stdout
-        if ISSUE_PATTERN.search(msg):
-            return True
-    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
-    if not branch or branch == "HEAD":
-        branch = os.environ.get("GITHUB_HEAD_REF") or os.environ.get("GITHUB_REF_NAME") or ""
-    if branch and branch not in ("main", "master") and BRANCH_ISSUE_PATTERN.search(branch):
-        return True
-    return False
-
 
 def commits_in_range(root: Path, base: str) -> list[str]:
     out = git(root, "rev-list", "--reverse", f"{base}..HEAD")
@@ -299,9 +270,21 @@ def check_issue_linking(root: Path, base: str, pr: str | None,
     )
     if not enforce_issue:
         return [], []
-    if not has_issue_reference(root, base, pr):
+    repository = issue_linking.repository(root) or ""
+    references = issue_linking.references(root, commits_in_range(root, base), repository, pr)
+    if not references:
         return ["candidate PR or commit range has no associated issue reference (e.g. closes #<id>, fixes #<id>, or #<id>)"], []
-    return [], ["verified PR-to-issue reference"]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        return ["cannot verify issue linking: GitHub repository identity is unavailable"], []
+    credential = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not credential:
+        return ["cannot verify issue linking: GH_TOKEN or GITHUB_TOKEN with issues: read is required"], []
+    try:
+        if any(issue_linking.existing_issue(repository, number, credential) for number in sorted(references)):
+            return [], ["verified PR-to-issue reference against an existing issue"]
+    except RuntimeError as exc:
+        return [f"cannot verify issue linking: {exc}; check issues: read permission and API access"], []
+    return [f"no referenced existing issue in {repository} (references: {', '.join('#' + str(n) for n in sorted(references))})"], []
 
 
 def run(root: Path, base: str | None, rerun_tests: bool = True,
@@ -314,6 +297,9 @@ def run(root: Path, base: str | None, rerun_tests: bool = True,
     notes.append(f"checking {base[:10]}..HEAD")
 
     issue_problems, issue_notes = check_issue_linking(root, base, pr, require_issue)
+    # Later checks and proof commands execute candidate code. They must not inherit the API token.
+    os.environ.pop("GH_TOKEN", None)
+    os.environ.pop("GITHUB_TOKEN", None)
     problems += issue_problems
     notes += issue_notes
 

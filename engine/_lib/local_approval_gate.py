@@ -50,7 +50,7 @@ def _find_test_files(root: Path, commits: set[str], test_globs: list[str]) -> li
     for sha in sorted(commits):
         view = View.commit(root, sha)
         for c in view.changes():
-            if c.status != "D" and (match_any(c.path, test_globs) or c.path.startswith(("tests/", "test/"))) and (root / c.path).is_file():
+            if c.status != "D" and match_any(c.path, test_globs) and (root / c.path).is_file():
                 if c.path not in touched:
                     touched.append(c.path)
     if not touched:
@@ -60,7 +60,7 @@ def _find_test_files(root: Path, commits: set[str], test_globs: list[str]) -> li
                 for p in sorted(tdir.rglob("*")):
                     if p.is_file() and not p.name.startswith((".", "_", "helper", "conftest")):
                         rel = p.relative_to(root).as_posix()
-                        if match_any(rel, test_globs) or rel.endswith((".py", ".js", ".ts", ".jsx", ".tsx")):
+                        if match_any(rel, test_globs):
                             if rel not in touched:
                                 touched.append(rel)
     return touched
@@ -69,7 +69,10 @@ def _find_test_files(root: Path, commits: set[str], test_globs: list[str]) -> li
 def _run_test_cmd(root: Path, commits: set[str], test_cmd: list[str], test_globs: list[str]) -> list[str]:
     failures = []
     if "{test_file}" in test_cmd:
-        for tf in _find_test_files(root, commits, test_globs):
+        files = _find_test_files(root, commits, test_globs)
+        if not files:
+            return ["test command uses {test_file}, but no test files were found"]
+        for tf in files:
             cmd = [tf if part == "{test_file}" else part for part in test_cmd]
             try:
                 res = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=300)
@@ -103,7 +106,10 @@ def _run_runners(root: Path, test_runners: list, commits: set[str], test_globs: 
         globs = runner.get("applies_to") if isinstance(runner.get("applies_to"), list) else test_globs
 
         if "{test_file}" in cmd:
-            for tf in _find_test_files(root, commits, globs):
+            files = _find_test_files(root, commits, globs)
+            if not files:
+                failures.append(f"test runner {runner_id} uses {{test_file}}, but no test files were found")
+            for tf in files:
                 sub_cmd = [tf if part == "{test_file}" else part for part in cmd]
                 try:
                     res = subprocess.run(sub_cmd, cwd=runner_cwd, capture_output=True, text=True, timeout=timeout)
@@ -133,7 +139,7 @@ def run_pre_push_tests(root: Path, commits: set[str]) -> list[str]:
         return []
     if not isinstance(project, dict):
         return []
-    if project.get("pre_push_tests") is False or os.environ.get("CGSPEC_SKIP_PRE_PUSH_TESTS") == "1":
+    if project.get("pre_push_tests") is False:
         return []
 
     test_cmd, test_runners = project.get("test_command"), project.get("test_runners")

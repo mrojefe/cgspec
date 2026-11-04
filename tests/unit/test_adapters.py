@@ -123,6 +123,8 @@ class WiringTests(unittest.TestCase):
         self.assertTrue((self.root / ".git/hooks/commit-msg").exists())
         workflow = (self.root / ".github/workflows/cgspec.yml").read_text()
         self.assertIn("engine/cgspec_hook.py\" ci", workflow)
+        self.assertIn("  issues: read\n", workflow)
+        self.assertIn("          GH_TOKEN: ${{ github.token }}", workflow)
         self.assertIn("CI visual proof (PR head)", workflow)
         self.assertTrue(all(re.fullmatch(r"[0-9a-f]{40}", sha) for sha in
                             re.findall(r"uses: [^@\s]+@([0-9a-f]+)", workflow)))
