@@ -26,10 +26,12 @@ def runner_project() -> dict:
     }]
     project["test_runners"] = [
         {"id": "unit", "adapter": "vitest-json", "command": ["npm", "exec", "--", "vitest", "run", "{test_file}", "--reporter=json", "--outputFile={report}"],
-         "cwd": ".", "selection": "test_file", "applies_to": ["src/**"], "environment": "node-tests", "timeout_seconds": 120,
+         "cwd": ".", "selection": "test_file", "test_globs": ["tests/**/*.test.js"],
+         "applies_to": ["src/**"], "environment": "node-tests", "timeout_seconds": 120,
          "isolation": "per-run-worktree", "report": "json", "artifacts": [], "semantics": {"adapter": "command-json-v1", "command": ["node", "tools/semantic-adapter.js", "{test_file}", "{test_id}"], "inputs": ["tools/semantic-adapter.js"]}},
         {"id": "browser", "adapter": "playwright-json", "command": ["npm", "exec", "--", "playwright", "test", "{test_file}", "--reporter=json"],
-         "cwd": ".", "selection": "test_file", "applies_to": ["src/**"], "environment": "node-tests", "timeout_seconds": 180,
+         "cwd": ".", "selection": "test_file", "test_globs": ["tests/**/*.spec.js"],
+         "applies_to": ["src/**"], "environment": "node-tests", "timeout_seconds": 180,
          "isolation": "per-run-worktree", "report": "stdout-json", "artifacts": ["test-results/**"], "semantics": {"adapter": "command-json-v1", "command": ["node", "tools/semantic-adapter.js", "{test_file}", "{test_id}"], "inputs": ["tools/semantic-adapter.js"]}},
     ]
     project["test_runners_approval"] = "trailer"
@@ -62,6 +64,9 @@ class NamedRunnerSchemaTests(unittest.TestCase):
         self.assertNotEqual(original, runner_contracts.resolve(changed, "browser", lambda _: b"adapter")[2])
         changed = copy.deepcopy(project)
         changed["test_runners"][1]["command"].append("--grep=only-one")
+        self.assertNotEqual(original, runner_contracts.resolve(changed, "browser", lambda _: b"adapter")[2])
+        changed = copy.deepcopy(project)
+        changed["test_runners"][1]["test_globs"] = ["tests/e2e/**"]
         self.assertNotEqual(original, runner_contracts.resolve(changed, "browser", lambda _: b"adapter")[2])
 
     def test_hash_binds_declared_input_bytes(self):

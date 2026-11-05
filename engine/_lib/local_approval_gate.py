@@ -45,7 +45,8 @@ def post_commit(root: Path) -> int:
     return EXIT_OK
 
 
-def _find_test_files(root: Path, commits: set[str], test_globs: list[str]) -> list[str]:
+def _find_test_files(root: Path, commits: set[str], test_globs: list[str],
+                     explicit_globs: list[str] | None = None) -> list[str]:
     def candidate(rel: str) -> bool:
         return (not rel.startswith("docs/_cgspec/01-engine/")
                 and match_any(rel, test_globs) and (root / rel).is_file())
@@ -54,14 +55,15 @@ def _find_test_files(root: Path, commits: set[str], test_globs: list[str]) -> li
         excluded = (".", "_", "helper", "conftest")
         if not Path(rel).name.startswith(excluded):
             return True
+        selectors = test_globs + (explicit_globs or [])
         return any(Path(pattern).name.startswith(excluded) and match_any(rel, [pattern])
-                   for pattern in test_globs)
+                   for pattern in selectors)
 
     touched: list[str] = []
     for sha in sorted(commits):
         view = View.commit(root, sha)
         for c in view.changes():
-            if c.status != "D" and candidate(c.path):
+            if c.status != "D" and candidate(c.path) and implicit_candidate(c.path):
                 if c.path not in touched:
                     touched.append(c.path)
     if not touched:
@@ -106,13 +108,24 @@ def _run_runners(repo: Path, root: Path, revision: str, project: dict,
     contract_errors = runner_contracts.errors(project)
     if contract_errors:
         return [f"invalid test runner contract: {problem}" for problem in contract_errors]
-    files = _find_test_files(root, commits, test_globs)
+    runners = project["test_runners"]
+    if len(runners) > 1 and any(not runner.get("test_globs") for runner in runners):
+        return ["multiple named test runners must each declare non-empty test_globs"]
+    explicit_globs = [pattern for runner in runners for pattern in runner.get("test_globs", [])]
+    files = _find_test_files(root, commits, test_globs, explicit_globs)
     if not files:
         return ["named test runners select no test files from path_classes.tests"]
-    for runner in project["test_runners"]:
+    selected = {runner["id"]: [test_file for test_file in files
+                               if match_any(test_file, runner.get("test_globs", test_globs))]
+                for runner in runners}
+    unassigned = [test_file for test_file in files
+                  if not any(test_file in runner_files for runner_files in selected.values())]
+    if unassigned:
+        return ["named test runners do not select test files: " + ", ".join(unassigned)]
+    for runner in runners:
         environment = next(item for item in project["test_environments"]
                            if item["id"] == runner["environment"])
-        for test_file in files:
+        for test_file in selected[runner["id"]]:
             detail = runner_execution.run_detail(repo, revision, runner, environment, test_file)
             if detail["result"] != "PASS":
                 reason = detail.get("reason") or detail["result"]
@@ -159,7 +172,7 @@ def run_pre_push_tests(repo: Path, root: Path, revision: str, commits: set[str])
 
     if isinstance(test_cmd, list) and test_cmd:
         failures.extend(_run_test_cmd(root, commits, test_cmd, test_globs))
-    elif isinstance(test_runners, list) and test_runners:
+    if isinstance(test_runners, list) and test_runners:
         failures.extend(_run_runners(repo, root, revision, project, commits, test_globs))
 
     return failures

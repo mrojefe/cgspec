@@ -459,6 +459,18 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("no test files were found", output)
 
+    def test_pre_push_touched_helper_cannot_hide_tracked_failing_test(self):
+        self.set_project_config(test_command=["python3", "{test_file}"])
+        tests = self.root / "tests"
+        tests.mkdir(exist_ok=True)
+        (tests / "failing_unit.py").write_text("raise SystemExit(1)\n")
+        previous = commit(self.root, "test: add failing unit test")
+        (tests / "helper.py").write_text("raise SystemExit(0)\n")
+        outgoing = commit(self.root, "test: update helper")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("test tests/failing_unit.py failed", output)
+
     def test_pre_push_rejects_malformed_outgoing_project_json(self):
         project = self.root / "docs/_cgspec/project.json"
         project.write_text("{invalid json\n")
@@ -580,6 +592,53 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         fixed_head = commit(self.root, "test: fix runner test")
         ref_update = f"refs/heads/codex/test-work {fixed_head} refs/heads/codex/test-work {self.base}\n"
         self.assertEqual(pre_push(self.root, ref_update), 0)
+
+    def test_pre_push_executes_named_runners_alongside_legacy_command(self):
+        self.set_named_runner()
+        self.write_named_test("tests/failing_runner.py", False)
+        self.set_project_config(test_command=["python3", "-c", "raise SystemExit(0)"])
+        outgoing = commit(self.root, "test: add failing named test during migration")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 1)
+        self.assertIn("test runner unit on tests/failing_runner.py failed", output)
+
+    def test_pre_push_routes_test_files_to_declared_named_runner(self):
+        self.set_named_runner()
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        unit = project["test_runners"][0]
+        unit["test_globs"] = ["tests/unit/**"]
+        unit["command"] = ["python3", "{test_file}", "{report}", "unit"]
+        browser = dict(unit, id="browser", test_globs=["tests/browser/**"],
+                       command=["python3", "{test_file}", "{report}", "browser"])
+        project["test_runners"] = [unit, browser]
+        write_json(project_file, project)
+        for path, expected in (("tests/unit/check.py", "unit"),
+                               ("tests/browser/check.py", "browser")):
+            test = self.root / path
+            test.parent.mkdir(parents=True, exist_ok=True)
+            test.write_text(
+                "import json, pathlib, sys\n"
+                f"ok = sys.argv[2] == {expected!r}\n"
+                f"pathlib.Path(sys.argv[1]).write_text(json.dumps({{'selector': {path!r}, "
+                "'assertions': {'passed': int(ok), 'failed': int(not ok)}, "
+                "'infrastructure': {'status': 'ok'}}))\n"
+                "raise SystemExit(0 if ok else 1)\n")
+        outgoing = commit(self.root, "test: add runner-specific tests")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 0, output)
+
+    def test_pre_push_rejects_ambiguous_multiple_runner_selection(self):
+        self.set_named_runner()
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        project["test_runners"].append(dict(project["test_runners"][0], id="browser"))
+        write_json(project_file, project)
+        self.write_named_test("tests/check.py", True)
+        outgoing = commit(self.root, "test: add ambiguously routed test")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 1)
+        self.assertIn("multiple named test runners must each declare non-empty test_globs", output)
 
     def test_pre_push_rejects_runner_without_test_file_selection(self):
         from _lib.local_approval_gate import pre_push

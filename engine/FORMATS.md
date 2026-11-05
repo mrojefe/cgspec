@@ -77,6 +77,10 @@ Removing named runners is not a silent downgrade.
 
 Each runner declares its ID, adapter, argument vector, working directory, test selection,
 `applies_to` source globs, environment reference, timeout, isolation, report, and artifacts.
+Optional `test_globs` select the test files for that runner. A single runner without them uses
+`path_classes.tests`; multiple runners must each declare them so local pre-push execution cannot
+send every test file to every framework. The selected files must still belong to
+`path_classes.tests`.
 An environment declares setup/readiness argument vectors, working directory, timeout,
 literal input files and `network` (`online` by default, or `offline-cache`). Optional `build`
 and `services` are arrays of argument vectors; `cleanup` is one argument vector.
