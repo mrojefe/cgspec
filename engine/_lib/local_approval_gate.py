@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 
 from . import commit_trust as trust
-from . import runner_contracts, runner_execution
+from . import runner_contracts, runner_execution, schema
 from .common import EXIT_FAIL, EXIT_OK
 from .gitview import View, git
 from .globs import match_any
@@ -46,23 +46,26 @@ def post_commit(root: Path) -> int:
 
 
 def _find_test_files(root: Path, commits: set[str], test_globs: list[str]) -> list[str]:
+    def candidate(rel: str) -> bool:
+        name = Path(rel).name
+        return (not rel.startswith("docs/_cgspec/01-engine/")
+                and not name.startswith((".", "_", "helper", "conftest"))
+                and match_any(rel, test_globs) and (root / rel).is_file())
+
     touched: list[str] = []
     for sha in sorted(commits):
         view = View.commit(root, sha)
         for c in view.changes():
-            if c.status != "D" and match_any(c.path, test_globs) and (root / c.path).is_file():
+            if c.status != "D" and candidate(c.path):
                 if c.path not in touched:
                     touched.append(c.path)
     if not touched:
-        for folder in ("tests", "test", "spec", "specs"):
-            tdir = root / folder
-            if tdir.is_dir():
-                for p in sorted(tdir.rglob("*")):
-                    if p.is_file() and not p.name.startswith((".", "_", "helper", "conftest")):
-                        rel = p.relative_to(root).as_posix()
-                        if match_any(rel, test_globs):
-                            if rel not in touched:
-                                touched.append(rel)
+        tracked = git(root, "ls-files", "-z")
+        if tracked.returncode:
+            return []
+        for rel in sorted(filter(None, tracked.stdout.split("\0"))):
+            if candidate(rel):
+                touched.append(rel)
     return touched
 
 
@@ -130,13 +133,14 @@ def _run_at_revision(repo: Path, revision: str, commits: set[str]) -> list[str]:
 def run_pre_push_tests(repo: Path, root: Path, revision: str, commits: set[str]) -> list[str]:
     pj_file = root / "docs" / "_cgspec" / "project.json"
     if not pj_file.exists():
-        return []
+        return ["outgoing revision has no docs/_cgspec/project.json; only an installation bootstrap that introduces it can establish test policy"]
     try:
         project = json.loads(pj_file.read_text(encoding="utf-8"))
     except (ValueError, OSError):
-        return []
-    if not isinstance(project, dict):
-        return []
+        return ["outgoing docs/_cgspec/project.json is unreadable or malformed"]
+    problems = schema.validate_named(project, "project")
+    if problems:
+        return [f"outgoing docs/_cgspec/project.json is invalid: {problem}" for problem in problems]
     if project.get("pre_push_tests") is False:
         return []
 

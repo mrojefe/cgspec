@@ -7,7 +7,9 @@ import os
 import subprocess
 import threading
 import unittest
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from pathlib import Path
 
 from tests.helpers import TempDir, git, git_project, hook, make_slice, run_script, set_test_command, write_json
@@ -349,6 +351,14 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
             "'infrastructure': {'status': 'ok'}}))\n"
             "raise SystemExit(0 if ok else 1)\n")
 
+    def push_result(self, revision: str, remote: str) -> tuple[int, str]:
+        from _lib.local_approval_gate import pre_push
+        output = StringIO()
+        update = f"refs/heads/codex/test-work {revision} refs/heads/codex/test-work {remote}\n"
+        with redirect_stdout(output):
+            code = pre_push(self.root, update)
+        return code, output.getvalue()
+
     def test_pre_push_blocks_when_configured_test_command_fails(self):
         from _lib.local_approval_gate import pre_push
         self.set_project_config(test_command=["python3", "-c", "import sys; print('TEST_FAILURE_DETECTED'); sys.exit(1)"])
@@ -382,6 +392,66 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         fixed_head = commit(self.root, "test: fix unit test")
         ref_update = f"refs/heads/codex/test-work {fixed_head} refs/heads/codex/test-work {self.base}\n"
         self.assertEqual(pre_push(self.root, ref_update), 0)
+
+    def test_pre_push_finds_monorepo_test_after_docs_only_change(self):
+        self.set_project_config(test_command=["python3", "{test_file}"])
+        project = self.root / "docs/_cgspec/project.json"
+        data = json.loads(project.read_text())
+        data["path_classes"]["tests"] = ["packages/*/__tests__/**"]
+        write_json(project, data)
+        test = self.root / "packages/core/__tests__/passing.py"
+        test.parent.mkdir(parents=True)
+        test.write_text("raise SystemExit(0)\n")
+        previous = commit(self.root, "test: add passing monorepo test")
+        agents_file = self.root / "AGENTS.md"
+        agents_file.write_text(agents_file.read_text() + "\n<!-- docs only -->\n")
+        outgoing = commit(self.root, "docs: update instructions")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 0, output)
+
+    def test_pre_push_finds_named_monorepo_test_after_docs_only_change(self):
+        self.set_named_runner(["packages/*/__tests__/**"])
+        self.write_named_test("packages/core/__tests__/passing.py", True)
+        previous = commit(self.root, "test: add passing named monorepo test")
+        agents_file = self.root / "AGENTS.md"
+        agents_file.write_text(agents_file.read_text() + "\n<!-- docs only -->\n")
+        outgoing = commit(self.root, "docs: update instructions")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 0, output)
+
+    def test_pre_push_rejects_malformed_outgoing_project_json(self):
+        project = self.root / "docs/_cgspec/project.json"
+        project.write_text("{invalid json\n")
+        outgoing = commit(self.root, "config: broken project policy")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 1)
+        self.assertIn("project.json is unreadable or malformed", output)
+
+    def test_pre_push_rejects_non_object_outgoing_project_json(self):
+        project = self.root / "docs/_cgspec/project.json"
+        project.write_text("[]\n")
+        outgoing = commit(self.root, "config: project policy is not an object")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 1)
+        self.assertIn("project.json is invalid", output)
+
+    def test_pre_push_rejects_missing_outgoing_project_json(self):
+        project = self.root / "docs/_cgspec/project.json"
+        project.unlink()
+        outgoing = commit(self.root, "config: remove project policy")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 1)
+        self.assertIn("outgoing revision has no docs/_cgspec/project.json", output)
+
+    def test_pre_push_rejects_invalid_outgoing_test_configuration(self):
+        project = self.root / "docs/_cgspec/project.json"
+        data = json.loads(project.read_text())
+        data["test_command"] = "python3 -m unittest"
+        write_json(project, data)
+        outgoing = commit(self.root, "config: invalid test command")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 1)
+        self.assertIn("project.json is invalid", output)
 
     def test_pre_push_ignores_uncommitted_test_repair(self):
         from _lib.local_approval_gate import pre_push
@@ -436,11 +506,11 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
             os.environ.pop("CGSPEC_SKIP_PRE_PUSH_TESTS", None)
 
     def test_pre_push_blocks_when_test_file_command_selects_none(self):
-        from _lib.local_approval_gate import pre_push
         self.set_project_config(test_command=["python3", "{test_file}"])
         current_head = commit(self.root, "docs: outgoing work")
-        ref_update = f"refs/heads/codex/test-work {current_head} refs/heads/codex/test-work {self.base}\n"
-        self.assertEqual(pre_push(self.root, ref_update), 1)
+        code, output = self.push_result(current_head, self.base)
+        self.assertEqual(code, 1)
+        self.assertIn("no test files were found", output)
 
     def test_pre_push_blocks_when_test_file_runner_selects_none(self):
         from _lib.local_approval_gate import pre_push
