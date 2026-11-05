@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "cgspec",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Project adoption, evidence-based design, bounded delivery, migration, and operations workflows with a vendored enforcement engine.",
   "author": { "name": "JeanFranck" },
   "repository": "https://github.com/BeOjefe/cgspec",

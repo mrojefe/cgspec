@@ -8,6 +8,7 @@ on:
   pull_request:
 permissions:
   contents: read
+  issues: read
 jobs:
   governance:
     runs-on: ubuntu-latest
@@ -57,6 +58,7 @@ jobs:
         id: proof
         env:
           CGSPEC_PROOF_DIR: ${{{{ runner.temp }}}}/cgspec-proof
+          GH_TOKEN: ${{{{ github.token }}}}
         run: python3 "$CGSPEC_RELEASE/engine/cgspec_hook.py" ci --root "$GITHUB_WORKSPACE" --base "$CGSPEC_BASE" --release-dir "$CGSPEC_RELEASE" --tool git
       - name: Retain structured proof on success or failure
         if: ${{{{ always() && steps.proof.outcome != 'skipped' }}}}

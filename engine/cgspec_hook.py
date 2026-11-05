@@ -160,7 +160,14 @@ def pre_commit(root: Path) -> int:
 def ci(root: Path, base: str | None, rerun: bool, args: argparse.Namespace) -> int:
     from _lib import ci_gate
     import doctor
-    problems, notes = ci_gate.run(root, base, rerun, Path(args.release_dir) if args.release_dir else None)
+    problems, notes = ci_gate.run(
+        root,
+        base,
+        rerun,
+        Path(args.release_dir) if args.release_dir else None,
+        pr=getattr(args, "pr", None),
+        require_issue=getattr(args, "require_issue", False),
+    )
     problems += [f"doctor {f.code} {f.path}: {f.message}" for f in doctor.run_checks(root) if f.is_error]
     for note in notes:
         print(note)
@@ -330,6 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
     for f in ("--file", "--applies-to", "--description", "--approval", "--command", "--guide", "--release-dir", "--repos", "--json-out", "--target", "--slices", "--id", "--message", "--prompt"):
         parser.add_argument(f)
     parser.add_argument("--no-rerun", action="store_true")
+    parser.add_argument("--require-issue", action="store_true")
     for f in ("--criteria", "--tests", "--proofs", "--outcomes", "--supersession", "--units", "--run-id", "--by", "--status", "--unit", "--unit-status", "--outcome", "--verify", "--commit-kind", "--pr"):
         parser.add_argument(f)
     parser.add_argument("--review-rounds", type=int)
@@ -350,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.event in CLI_MODULES: return importlib.import_module(f"_lib.{CLI_MODULES[args.event]}").cli(root, args)
         if args.event == "pre-commit": return pre_commit(root)
         if args.event == "post-commit": from _lib.local_approval_gate import post_commit; return post_commit(root)
-        if args.event == "pre-push": from _lib.local_approval_gate import pre_push; return pre_push(root, sys.stdin.read())
+        if args.event in ("pre-push", "git-pre-push"): from _lib.local_approval_gate import pre_push; return pre_push(root, sys.stdin.read())
         if args.event == "post-tool": return post_tool(root, args.tool, sys.stdin.read())
         if args.event == "doc": return cmd_doc(root, args)
         if args.event == "check": from _lib.checks import cli; return cli(root, args)

@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-from . import checks
+from . import checks, issue_linking
 from .commit_gate import evaluate
 from .gitview import View, git
 
 TEST_TIMEOUT = 600
-
 
 def commits_in_range(root: Path, base: str) -> list[str]:
     out = git(root, "rev-list", "--reverse", f"{base}..HEAD")
@@ -242,12 +242,74 @@ def effective_base(root: Path, base: str | None) -> str:
     return base
 
 
+def check_issue_linking(root: Path, base: str, pr: str | None,
+                        require_issue: bool | None) -> tuple[list[str], list[str]]:
+    pj_file = root / "docs" / "_cgspec" / "project.json"
+    project_data = {}
+    if pj_file.exists():
+        try:
+            project_data = json.loads(pj_file.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            project_data = {}
+    if not isinstance(project_data, dict):
+        project_data = {}
+
+    is_ci_pr = (
+        os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
+        and (
+            not os.environ.get("GITHUB_WORKSPACE")
+            or Path(os.environ["GITHUB_WORKSPACE"]).resolve() == root.resolve()
+        )
+    )
+    enforce_issue = (
+        pr is not None
+        or bool(require_issue)
+        or bool(project_data.get("require_issue_linking"))
+        or os.environ.get("CGSPEC_REQUIRE_ISSUE") == "1"
+        or is_ci_pr
+    )
+    if not enforce_issue:
+        return [], []
+    repository = issue_linking.repository(root) or ""
+    try:
+        metadata = issue_linking.event_pr_metadata() if is_ci_pr else ""
+    except RuntimeError as exc:
+        return [f"cannot verify issue linking: {exc}"], []
+    references = issue_linking.references(root, commits_in_range(root, base), repository,
+                                          "\n".join(filter(None, (pr, metadata))))
+    if not references:
+        return ["candidate PR or commit range has no associated issue reference (e.g. closes #<id>, fixes #<id>, or #<id>)"], []
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        return ["cannot verify issue linking: GitHub repository identity is unavailable"], []
+    credential = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not credential:
+        return ["cannot verify issue linking: GH_TOKEN or GITHUB_TOKEN with issues: read is required"], []
+    try:
+        if any(issue_linking.existing_issue(repository, owner, number, credential)
+               for owner, number in sorted(references)):
+            return [], ["verified PR-to-issue reference against an existing issue"]
+    except RuntimeError as exc:
+        return [f"cannot verify issue linking: {exc}; check issues: read permission and API access"], []
+    labels = ", ".join(f"{owner}#{number}" for owner, number in sorted(references))
+    return [f"no referenced existing issue in {repository} (references: {labels})"], []
+
+
 def run(root: Path, base: str | None, rerun_tests: bool = True,
-        release_dir: Path | None = None) -> tuple[list[str], list[str]]:
+        release_dir: Path | None = None,
+        pr: str | None = None,
+        require_issue: bool | None = None) -> tuple[list[str], list[str]]:
     """(problems, notes) for the range base..HEAD."""
     problems, notes = [], []
     base = effective_base(root, base)
     notes.append(f"checking {base[:10]}..HEAD")
+
+    issue_problems, issue_notes = check_issue_linking(root, base, pr, require_issue)
+    # Later checks and proof commands execute candidate code. They must not inherit the API token.
+    os.environ.pop("GH_TOKEN", None)
+    os.environ.pop("GITHUB_TOKEN", None)
+    problems += issue_problems
+    notes += issue_notes
+
     for commit in commits_in_range(root, base):
         subject = git(root, "log", "-1", "--format=%h %s", commit).stdout.strip()
         view = View.commit(root, commit)
