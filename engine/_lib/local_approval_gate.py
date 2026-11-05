@@ -19,6 +19,20 @@ from .common import EXIT_FAIL, EXIT_OK
 from .gitview import View, git
 from .globs import match_any
 
+_AUXILIARY_PREFIXES = (".", "_", "helper", "conftest", "fixture")
+
+
+def _has_auxiliary_component(value: str) -> bool:
+    return any(part.startswith(_AUXILIARY_PREFIXES)
+               for part in value.replace("\\", "/").split("/"))
+
+
+def _implicit_test_candidate(rel: str, selectors: list[str]) -> bool:
+    if not _has_auxiliary_component(rel):
+        return True
+    return any(_has_auxiliary_component(pattern) and match_any(rel, [pattern])
+               for pattern in selectors)
+
 
 def commit_problems(view: View) -> list[str]:
     reasons = trust.append_only(view) + trust.approvals_have_inbox_lines(view) + trust.approver_key_change(view)
@@ -47,25 +61,17 @@ def post_commit(root: Path) -> int:
 
 def _find_test_files(root: Path, commits: set[str], test_globs: list[str],
                      explicit_globs: list[str] | None = None, force_all: bool = False) -> list[str]:
+    selectors = test_globs + (explicit_globs or [])
+
     def candidate(rel: str) -> bool:
         return (not rel.startswith("docs/_cgspec/01-engine/")
                 and match_any(rel, test_globs) and (root / rel).is_file())
-
-    def implicit_candidate(rel: str) -> bool:
-        excluded = (".", "_", "helper", "conftest")
-        def excluded_part(value: str) -> bool:
-            return any(part.startswith(excluded) for part in value.replace("\\", "/").split("/"))
-        if not excluded_part(rel):
-            return True
-        selectors = test_globs + (explicit_globs or [])
-        return any(excluded_part(pattern) and match_any(rel, [pattern])
-                   for pattern in selectors)
 
     touched: list[str] = []
     for sha in sorted(commits):
         view = View.commit(root, sha)
         for c in view.changes():
-            if c.status != "D" and candidate(c.path) and implicit_candidate(c.path):
+            if c.status != "D" and candidate(c.path) and _implicit_test_candidate(c.path, selectors):
                 if c.path not in touched:
                     touched.append(c.path)
     if force_all or not touched:
@@ -74,7 +80,7 @@ def _find_test_files(root: Path, commits: set[str], test_globs: list[str],
         if tracked.returncode:
             return []
         for rel in sorted(filter(None, tracked.stdout.split("\0"))):
-            if candidate(rel) and implicit_candidate(rel):
+            if candidate(rel) and _implicit_test_candidate(rel, selectors):
                 touched.append(rel)
     return touched
 
@@ -127,16 +133,21 @@ def _run_runners(repo: Path, root: Path, revision: str, project: dict,
     policy_changed = "docs/_cgspec/project.json" in changed
     selectors = {runner["id"]: runner.get("test_globs", test_globs) for runner in runners}
     environments = {environment["id"]: environment for environment in project["test_environments"]}
-    watched = {}
+    direct_watched = {}
     for runner in runners:
         environment = environments[runner["environment"]]
-        watched[runner["id"]] = (runner["applies_to"] + selectors[runner["id"]] +
-                                 environment.get("inputs", []) +
-                                 runner.get("semantics", {}).get("inputs", []))
-    unrouted_change = any(not any(match_any(path, patterns) for patterns in watched.values())
+        direct_watched[runner["id"]] = (runner["applies_to"] + environment.get("inputs", []) +
+                                        runner.get("semantics", {}).get("inputs", []))
+
+    def routed(path: str, runner_id: str) -> bool:
+        selected_test = (match_any(path, selectors[runner_id]) and
+                         _implicit_test_candidate(path, test_globs + selectors[runner_id]))
+        return match_any(path, direct_watched[runner_id]) or selected_test
+
+    unrouted_change = any(not any(routed(path, runner["id"]) for runner in runners)
                           for path in changed)
     runner_affected = {runner["id"]: policy_changed or unrouted_change or any(
-        match_any(path, watched[runner["id"]]) for path in changed) for runner in runners}
+        routed(path, runner["id"]) for path in changed) for runner in runners}
     files = _find_test_files(root, commits, test_globs, explicit_globs, any(runner_affected.values()))
     if not files:
         return ["named test runners select no test files from path_classes.tests"]
