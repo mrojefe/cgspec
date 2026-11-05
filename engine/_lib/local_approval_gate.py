@@ -140,7 +140,8 @@ def _run_runners(repo: Path, root: Path, revision: str, project: dict,
                                         runner.get("semantics", {}).get("inputs", []))
 
     def routed(path: str, runner_id: str) -> bool:
-        selected_test = (match_any(path, selectors[runner_id]) and
+        selected_test = (match_any(path, test_globs) and
+                         match_any(path, selectors[runner_id]) and
                          _implicit_test_candidate(path, test_globs + selectors[runner_id]))
         return match_any(path, direct_watched[runner_id]) or selected_test
 

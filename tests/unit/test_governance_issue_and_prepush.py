@@ -772,6 +772,38 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("test runner browser on e2e/browser/check.py failed", output)
 
+    def test_pre_push_runner_glob_outside_test_class_does_not_route_change(self):
+        self.set_named_runner(["tests/**", "e2e/**"])
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        unit = project["test_runners"][0]
+        unit["test_globs"] = ["tests/**", "shared/**"]
+        browser = dict(unit, id="browser", test_globs=["e2e/**"])
+        project["test_runners"] = [unit, browser]
+        write_json(project_file, project)
+        self.write_named_test("tests/unit/check.py", True)
+        browser_test = self.root / "e2e/browser/check.py"
+        browser_test.parent.mkdir(parents=True)
+        browser_test.write_text(
+            "import json, pathlib, sys\n"
+            "ok = pathlib.Path('shared/config.py').read_text() == 'VALUE = 1\\n'\n"
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+            "'selector': 'e2e/browser/check.py', "
+            "'assertions': {'passed': int(ok), 'failed': int(not ok)}, "
+            "'infrastructure': {'status': 'ok'}}))\n"
+            "raise SystemExit(0 if ok else 1)\n")
+        config = self.root / "shared/config.py"
+        config.parent.mkdir()
+        config.write_text("VALUE = 1\n")
+        previous = commit(self.root, "test: establish suites with shared dependency")
+        config.write_text("VALUE = 2\n")
+        unit_test = self.root / "tests/unit/check.py"
+        unit_test.write_text(unit_test.read_text() + "\n")
+        outgoing = commit(self.root, "test: change shared dependency with unit test")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("test runner browser on e2e/browser/check.py failed", output)
+
     def test_pre_push_rejects_affected_runner_whose_last_test_was_deleted(self):
         self.set_named_runner()
         project_file = self.root / "docs/_cgspec/project.json"
