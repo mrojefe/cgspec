@@ -1,7 +1,7 @@
 # CGSpec
-Created: unknown · Last edited: 2026-10-31T20:15:00Z
+Created: unknown · Last edited: 2026-11-05T00:00:00Z
 
-[![Version](https://img.shields.io/badge/version-0.3.4-2563eb?style=flat-square)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.3.5-2563eb?style=flat-square)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.10%2B-059669?style=flat-square)](engine/)
 [![Hosts](https://img.shields.io/badge/hosts-Claude_Code_%7C_Codex_%7C_Antigravity-7c3aed?style=flat-square)](plugin.json)
 [![Enforcement](https://img.shields.io/badge/enforcement-Deterministic_Hooks_%26_CI-d97706?style=flat-square)](docs/METHOD.md#8-enforcement-engine)

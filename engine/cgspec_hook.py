@@ -200,7 +200,7 @@ def lifecycle(root: Path, event: str, args: argparse.Namespace, raw: str = "") -
     if event in ("session-start", "pre-compact"):
         if event == "pre-compact":
             session.capture_before_compact(root)
-        pack = session.pack(root, summary)
+        pack = session.pack(root, summary, args.tool)
         print(json.dumps({"injectSteps": [{"systemMessage": {"systemMessage": pack}}]})
               if args.tool == "antigravity" else pack)
         return EXIT_OK
@@ -260,6 +260,10 @@ def post_tool(root: Path, tool: str, raw: str) -> int:
             changed = [ctx.relative(p) for p in targets + deletes]
         mark_stale(root, [c for c in changed if c])
         warning = count_helper(root) if payload.get("tool_name") in HELPER_TOOLS else None
+        quota_warning = None
+        if tool == "claude" and not warning:
+            from _lib.quota_notice import next_notice
+            quota_warning = next_notice(root, str(payload.get("session_id") or "unknown"))
     except Exception as exc:
         print(f"cgspec_hook: post-tool failed (not blocking): {exc!r}", file=sys.stderr)
         if tool == "antigravity": print("{}")
@@ -268,6 +272,10 @@ def post_tool(root: Path, tool: str, raw: str) -> int:
         print(warning, file=sys.stderr)
         if tool == "antigravity": print("{}")
         return EXIT_BLOCK if tool == "claude" else EXIT_OK
+    if quota_warning:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                                 "additionalContext": quota_warning}}))
+        return EXIT_OK
     if tool == "antigravity": print("{}")
     return EXIT_OK
 

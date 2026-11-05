@@ -15,14 +15,14 @@ import shutil
 from .adapter_templates import CURSOR_RULE, GITHUB_STEPS, SELECT, WORKFLOW
 from .ci_visual import VISUAL_WORKFLOW
 from .common import CgspecError, STATE_DIR, utc_now, write_json
-from . import git_hooks
+from . import claude_statusline, git_hooks
 
 HOOK = "docs/_cgspec/01-engine/cgspec_hook.py"
 MARK = "cgspec_hook.py"
 
 CLAUDE_EVENTS = {
     "PreToolUse": ("Write|Edit|MultiEdit|NotebookEdit|Bash", "pre-tool"),
-    "PostToolUse": ("Write|Edit|MultiEdit|NotebookEdit|Bash|Task|Agent", "post-tool"),
+    "PostToolUse": (None, "post-tool"),
     "UserPromptSubmit": (None, "user-message"),
     "SessionStart": (None, "session-start"),
     "PreCompact": (None, "pre-compact"),
@@ -200,10 +200,15 @@ def _wire_git(root: Path, record: dict) -> list[str]:
 def wire(root: Path, tools: list[str], owned: dict, profile: str = "") -> list[str]:
     notes, record = [], owned.setdefault("adapters", {})
     if "claude" in tools:
-        record["claude"] = {"path": ".claude/settings.json", "created": _merge_json(root / ".claude/settings.json", _claude)}
+        created, status_wired, previous, user_chain, note = claude_statusline.wire(
+            root / ".claude/settings.json", _claude)
+        record["claude"] = {"path": ".claude/settings.json", "created": created,
+                            "status_line_wired": status_wired, "status_line_previous": previous,
+                            "status_line_user_chain": user_chain}
         launcher = shutil.which("claude")
         record["claude"]["launcher"] = str(Path(launcher).absolute()) if launcher else None
         notes.append("wired .claude/settings.json")
+        notes.append(note)
     if "antigravity" in tools:
         record["antigravity"] = {"path": ".agents/hooks.json", "created": _merge_json(root / ".agents/hooks.json", _antigravity)}
         notes.append("wired .agents/hooks.json (Antigravity sends no user message to hooks: inbox capture unavailable there)")
@@ -257,10 +262,12 @@ def refresh(root: Path, owned: dict) -> list[str]:
                 if not hooks[event]:
                     del hooks[event]
             _claude(data)
+            status_note = claude_statusline.refresh(data, record["claude"])
             write_json(path, data)
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             raise CgspecError(f"cannot refresh Claude hooks: {exc}") from exc
         notes.append("refreshed Claude hooks")
+        notes.append(status_note)
         launcher = shutil.which("claude")
         record["claude"]["launcher"] = str(Path(launcher).absolute()) if launcher else None
     if "antigravity" in record:
@@ -301,7 +308,7 @@ def refresh(root: Path, owned: dict) -> list[str]:
     return notes
 
 
-def _strip_claude(path: Path, created: bool) -> None:
+def _strip_claude(path: Path, record: dict) -> None:
     if not path.is_file():
         return
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -312,7 +319,8 @@ def _strip_claude(path: Path, created: bool) -> None:
             del hooks[event]
     if not hooks:
         data.pop("hooks", None)
-    if created and not data:
+    claude_statusline.remove(data, record)
+    if record.get("created", False) and not data:
         path.unlink()
     else:
         write_json(path, data)
@@ -336,7 +344,7 @@ def unwire(root: Path, owned: dict) -> list[str]:
     record = owned.get("adapters", {})
     notes = git_hooks.remove(root, record, GIT_HOOK, HOOK)
     if "claude" in record:
-        _strip_claude(root / ".claude/settings.json", record["claude"].get("created", False))
+        _strip_claude(root / ".claude/settings.json", record["claude"])
     if "antigravity" in record:
         path = root / ".agents/hooks.json"
         if path.is_file():

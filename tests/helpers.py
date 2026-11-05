@@ -49,6 +49,8 @@ def snapshot_tree(root: Path) -> dict[str, bytes]:
 
 
 def install(root: Path, profile: str = "web-workspace", topology: str = "single", *extra: str, env: dict | None = None):
+    env = dict(os.environ if env is None else env)
+    env.setdefault("CLAUDE_CONFIG_DIR", str(root / ".test-claude-config"))
     return run_script("install.py", "install", "--root", str(root), "--profile", profile,
                       "--topology", topology, "--tools", "claude,git", *extra, env=env)
 
@@ -57,10 +59,11 @@ def doctor(root: Path, *extra: str):
     return run_script("doctor.py", "--root", str(root), *extra)
 
 
-def hook(root: Path, event: str, payload: dict | None = None, *extra: str):
+def hook(root: Path, event: str, payload: dict | None = None, *extra: str,
+         env: dict | None = None):
     import json as _json
     return run_script("cgspec_hook.py", event, "--root", str(root), *extra,
-                      stdin=_json.dumps(payload) if payload is not None else "")
+                      stdin=_json.dumps(payload) if payload is not None else "", env=env)
 
 
 def claude_payload(root: Path, tool: str, **tool_input) -> dict:
