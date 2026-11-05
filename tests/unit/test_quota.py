@@ -107,6 +107,33 @@ class QuotaTests(unittest.TestCase):
             self.assertIn("five_hour 60% remaining", pack.stdout)
             self.assertIn("source manual", pack.stdout)
 
+    def test_multimodel_matrix_and_subagent_preflight(self):
+        from _lib.quota import evaluate_subagent_preflight, evaluate_assistant_prompt
+        data = reading(
+            source="antigravity",
+            models={
+                "gemini-argon": {"used_pct": 100, "status": "exhausted", "resets_at": "2026-10-20T14:00:00Z"},
+                "claude-sonnet": {"used_pct": 0, "status": "nominal"}
+            },
+            default_fallback={"gemini-argon": "claude-sonnet"}
+        )
+        # Check subagent preflight for exhausted model
+        pre_exhausted = evaluate_subagent_preflight(data, "gemini-argon", now=NOW)
+        self.assertFalse(pre_exhausted["allowed"])
+        self.assertEqual(pre_exhausted["decision"], "deny")
+        self.assertEqual(pre_exhausted["fallback_model"], "claude-sonnet")
+        self.assertIn("exhausted", pre_exhausted["reason"])
+
+        # Check subagent preflight for available model
+        pre_ok = evaluate_subagent_preflight(data, "claude-sonnet", now=NOW)
+        self.assertTrue(pre_ok["allowed"])
+        self.assertEqual(pre_ok["decision"], "allow")
+
+        # Check conversational assistant prompt check
+        adv = evaluate_assistant_prompt(data, now=NOW)
+        self.assertEqual(adv["status"], "warning")
+        self.assertIn("gemini-argon", adv["warning"])
+
 
 if __name__ == "__main__":
     unittest.main()

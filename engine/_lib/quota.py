@@ -37,13 +37,39 @@ def _window(data: dict | None, now: datetime) -> tuple[float | None, str]:
     return 100 - used, ""
 
 
+def _eval_model(model_id: str, data: dict, now: datetime) -> dict:
+    if not isinstance(data, dict) or "used_pct" not in data:
+        return {"model": model_id, "status": "unknown", "remaining_pct": None}
+    used = data["used_pct"]
+    if isinstance(used, bool) or not isinstance(used, (int, float)) or not 0 <= used <= 100:
+        return {"model": model_id, "status": "invalid", "remaining_pct": None}
+    remaining = 100 - used
+    status = data.get("status")
+    if not status:
+        if remaining <= 2:
+            status = "exhausted"
+        elif remaining <= 20:
+            status = "warning"
+        else:
+            status = "nominal"
+    resets_at = data.get("resets_at")
+    return {
+        "model": model_id,
+        "remaining_pct": remaining,
+        "status": status,
+        "resets_at": resets_at,
+    }
+
+
 def evaluate(data, *, now: datetime | None = None) -> dict:
     """Return safety advice, not a provider-enforced task gate or quota measurement."""
     result = {"mode": "bounded", "reason": "no valid quota reading available",
-              "remaining_pct": None, "windows": {}, "weekly_resume": "unknown", "context": CONTEXT}
+              "remaining_pct": None, "windows": {}, "models": {}, "default_fallback": {},
+              "weekly_resume": "unknown", "context": CONTEXT}
     if not isinstance(data, dict):
         return result
-    metadata = {key: value for key, value in data.items() if key not in ("five_hour", "weekly")}
+    metadata = {key: value for key, value in data.items()
+                if key not in ("five_hour", "weekly", "models", "default_fallback")}
     if validate_named(metadata, "quota"):
         return result
     if data["source"] == "unavailable":
@@ -66,6 +92,16 @@ def evaluate(data, *, now: datetime | None = None) -> dict:
     weekly = result["windows"]["weekly"]
     if weekly is not None:
         result["weekly_resume"] = "blocked" if weekly <= 10 else "quota-permits"
+
+    # Evaluate per-model matrix if present
+    if isinstance(data.get("models"), dict):
+        result["models"] = {
+            m_id: _eval_model(m_id, m_data, now)
+            for m_id, m_data in data["models"].items()
+        }
+    if isinstance(data.get("default_fallback"), dict):
+        result["default_fallback"] = dict(data["default_fallback"])
+
     if remaining is not None and remaining <= 5:
         result.update(mode="emergency", reason="save logs and checkpoint; no new code or subtasks")
     elif remaining is not None and remaining <= CHECKPOINT_REMAINING_PCT:
@@ -77,6 +113,66 @@ def evaluate(data, *, now: datetime | None = None) -> dict:
     else:
         result.update(mode="normal", reason="fresh quota snapshot; recheck before expensive work")
     return result
+
+
+def evaluate_subagent_preflight(data, model_name: str | None = None, *, now: datetime | None = None) -> dict:
+    """Evaluate pre-flight eligibility before invoking or waking a subagent."""
+    evaluated = evaluate(data, now=now)
+    models = evaluated.get("models", {})
+    fallbacks = evaluated.get("default_fallback", {})
+
+    # If general emergency stop is active, subagents cannot be invoked
+    if evaluated["mode"] == "emergency":
+        return {
+            "allowed": False,
+            "decision": "deny",
+            "reason": f"Global quota emergency stop active ({evaluated['remaining_pct']}% remaining).",
+            "fallback_model": None,
+        }
+
+    # If specific model requested or inherited
+    target = model_name or "default"
+    model_info = models.get(target)
+
+    # Check alias or generic match (e.g. gemini-argon, gemini-4-argon)
+    if not model_info:
+        for k, v in models.items():
+            if target in k or k in target:
+                model_info = v
+                target = k
+                break
+
+    if model_info and model_info.get("status") == "exhausted":
+        fallback = fallbacks.get(target)
+        return {
+            "allowed": False,
+            "decision": "deny",
+            "reason": f"Model tier '{target}' is exhausted (0% remaining; resets at {model_info.get('resets_at', 'unknown')}).",
+            "fallback_model": fallback,
+        }
+
+    return {"allowed": True, "decision": "allow", "reason": "Quota nominal.", "fallback_model": None}
+
+
+def evaluate_assistant_prompt(data, *, now: datetime | None = None) -> dict:
+    """Pre-flight check for the interactive conversational assistant on user prompt submit."""
+    evaluated = evaluate(data, now=now)
+    models = evaluated.get("models", {})
+    exhausted_models = [m for m, v in models.items() if v.get("status") == "exhausted"]
+
+    if evaluated["mode"] == "emergency":
+        return {
+            "status": "emergency",
+            "warning": f"Attention: Quota critique ({evaluated['remaining_pct']}% restant). Sauvegarde en cours.",
+            "exhausted_models": exhausted_models,
+        }
+    if exhausted_models:
+        return {
+            "status": "warning",
+            "warning": f"Attention: Les modèles suivants sont épuisés: {', '.join(exhausted_models)}.",
+            "exhausted_models": exhausted_models,
+        }
+    return {"status": "nominal", "warning": None, "exhausted_models": []}
 
 
 def snapshot(root: Path) -> dict:
@@ -93,6 +189,9 @@ def summary(result: dict) -> str:
         values = ", ".join(f"{key} {value:g}% remaining" for key, value in result["windows"].items()
                            if value is not None)
         lines.append(f"{values or 'no usable window'} (source {result['source']}, read {result['read_at']})")
+    if result.get("models"):
+        m_lines = [f"{m}: {v.get('remaining_pct')}% ({v.get('status')})" for m, v in result["models"].items()]
+        lines.append(f"models: {', '.join(m_lines)}")
     if result["weekly_resume"] == "blocked":
         lines.append("weekly quota: no automatic wake-up")
     lines.append(result["context"])

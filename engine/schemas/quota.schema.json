@@ -6,9 +6,17 @@
   "properties": {
     "schema": {"const": 1},
     "read_at": {"type": "string"},
-    "source": {"enum": ["claude-statusline", "manual", "unavailable"]},
+    "source": {"enum": ["claude-statusline", "antigravity", "codex", "universal-daemon", "manual", "unavailable"]},
     "five_hour": {"$ref": "#/definitions/window"},
-    "weekly": {"$ref": "#/definitions/window"}
+    "weekly": {"$ref": "#/definitions/window"},
+    "models": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/definitions/model_quota"}
+    },
+    "default_fallback": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    }
   },
   "definitions": {
     "window": {
@@ -17,6 +25,15 @@
       "properties": {
         "used_pct": {"type": "number", "minimum": 0, "maximum": 100},
         "resets_at": {"type": "string"}
+      }
+    },
+    "model_quota": {
+      "type": "object",
+      "required": ["used_pct"],
+      "properties": {
+        "used_pct": {"type": "number", "minimum": 0, "maximum": 100},
+        "resets_at": {"type": "string"},
+        "status": {"enum": ["nominal", "warning", "exhausted"]}
       }
     }
   }
