@@ -90,8 +90,9 @@ def _changed_paths(root: Path, commits: set[str]) -> set[str]:
 def _run_test_cmd(root: Path, commits: set[str], test_cmd: list[str], test_globs: list[str]) -> list[str]:
     failures = []
     if "{test_file}" in test_cmd:
-        force_all = any(not match_any(path, test_globs) for path in _changed_paths(root, commits))
-        files = _find_test_files(root, commits, test_globs, force_all=force_all)
+        # Legacy commands have no approved dependency or suite map, so a touched
+        # test is not enough to establish which other tests are unaffected.
+        files = _find_test_files(root, commits, test_globs, force_all=True)
         if not files:
             return ["test command uses {test_file}, but no test files were found"]
         for tf in files:
@@ -124,12 +125,21 @@ def _run_runners(repo: Path, root: Path, revision: str, project: dict,
     explicit_globs = [pattern for runner in runners for pattern in runner.get("test_globs", [])]
     changed = _changed_paths(root, commits)
     policy_changed = "docs/_cgspec/project.json" in changed
-    affected = policy_changed or any(match_any(path, runner["applies_to"])
-                                     for path in changed for runner in runners)
-    files = _find_test_files(root, commits, test_globs, explicit_globs, affected)
+    selectors = {runner["id"]: runner.get("test_globs", test_globs) for runner in runners}
+    environments = {environment["id"]: environment for environment in project["test_environments"]}
+    watched = {}
+    for runner in runners:
+        environment = environments[runner["environment"]]
+        watched[runner["id"]] = (runner["applies_to"] + selectors[runner["id"]] +
+                                 environment.get("inputs", []) +
+                                 runner.get("semantics", {}).get("inputs", []))
+    unrouted_change = any(not any(match_any(path, patterns) for patterns in watched.values())
+                          for path in changed)
+    runner_affected = {runner["id"]: policy_changed or unrouted_change or any(
+        match_any(path, watched[runner["id"]]) for path in changed) for runner in runners}
+    files = _find_test_files(root, commits, test_globs, explicit_globs, any(runner_affected.values()))
     if not files:
         return ["named test runners select no test files from path_classes.tests"]
-    selectors = {runner["id"]: runner.get("test_globs", test_globs) for runner in runners}
     selected = {runner["id"]: [test_file for test_file in files
                                if match_any(test_file, selectors[runner["id"]])]
                 for runner in runners}
@@ -138,9 +148,8 @@ def _run_runners(repo: Path, root: Path, revision: str, project: dict,
     if unassigned and not project.get("test_command"):
         return ["named test runners do not select test files: " + ", ".join(unassigned)]
     for runner in runners:
-        environment = next(item for item in project["test_environments"]
-                           if item["id"] == runner["environment"])
-        force_all = policy_changed or any(match_any(path, runner["applies_to"]) for path in changed)
+        environment = environments[runner["environment"]]
+        force_all = runner_affected[runner["id"]]
         runner_files = _find_test_files(root, commits, test_globs, selectors[runner["id"]], force_all)
         runner_files = [test_file for test_file in runner_files
                         if match_any(test_file, selectors[runner["id"]])]

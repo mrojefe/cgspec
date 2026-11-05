@@ -694,6 +694,69 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("test runner unit selects no test files", output)
 
+    def test_pre_push_runner_input_change_runs_every_affected_suite(self):
+        self.set_named_runner()
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        project["test_environments"][0]["inputs"] = ["runner.lock"]
+        unit = project["test_runners"][0]
+        unit["test_globs"] = ["tests/unit/**"]
+        browser = dict(unit, id="browser", test_globs=["tests/browser/**"])
+        project["test_runners"] = [unit, browser]
+        write_json(project_file, project)
+        (self.root / "runner.lock").write_text("first\n")
+        self.write_named_test("tests/unit/check.py", True)
+        self.write_named_test("tests/browser/check.py", False)
+        previous = commit(self.root, "test: establish input-bound suites")
+        (self.root / "runner.lock").write_text("second\n")
+        unit_test = self.root / "tests/unit/check.py"
+        unit_test.write_text(unit_test.read_text() + "\n")
+        outgoing = commit(self.root, "build: update shared runner input")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("test runner browser on tests/browser/check.py failed", output)
+
+    def test_pre_push_unrouted_helper_change_runs_all_named_suites(self):
+        self.set_named_runner()
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        unit = project["test_runners"][0]
+        unit["test_globs"] = ["tests/unit/**"]
+        browser = dict(unit, id="browser", test_globs=["tests/browser/**"])
+        project["test_runners"] = [unit, browser]
+        write_json(project_file, project)
+        self.write_named_test("tests/unit/check.py", True)
+        self.write_named_test("tests/browser/check.py", False)
+        helper = self.root / "tests/helpers/shared.py"
+        helper.parent.mkdir(parents=True)
+        helper.write_text("VALUE = 1\n")
+        previous = commit(self.root, "test: establish suites and shared helper")
+        helper.write_text("VALUE = 2\n")
+        unit_test = self.root / "tests/unit/check.py"
+        unit_test.write_text(unit_test.read_text() + "\n")
+        outgoing = commit(self.root, "test: update shared helper with unit test")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("test runner browser on tests/browser/check.py failed", output)
+
+    def test_pre_push_rejects_affected_runner_whose_last_test_was_deleted(self):
+        self.set_named_runner()
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        unit = project["test_runners"][0]
+        unit["test_globs"] = ["tests/unit/**"]
+        browser = dict(unit, id="browser", test_globs=["tests/browser/**"])
+        project["test_runners"] = [unit, browser]
+        write_json(project_file, project)
+        self.write_named_test("tests/unit/check.py", True)
+        self.write_named_test("tests/browser/check.py", True)
+        previous = commit(self.root, "test: establish both runner suites")
+        (self.root / "tests/browser/check.py").unlink()
+        outgoing = commit(self.root, "test: remove final browser test")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("test runner browser selects no test files", output)
+
     def test_pre_push_rejects_ambiguous_multiple_runner_selection(self):
         self.set_named_runner()
         project_file = self.root / "docs/_cgspec/project.json"
