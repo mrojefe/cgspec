@@ -96,6 +96,9 @@ def errors(project: dict) -> list[str]:
         reasons.append("test_runners IDs must be unique")
     if len(set(env_ids)) != len(env_ids):
         reasons.append("test_environments IDs must be unique")
+    if len(runners) > 1 and any(not isinstance(runner.get("test_globs"), list) or
+                                not runner.get("test_globs") for runner in runners):
+        reasons.append("multiple test_runners must each declare non-empty test_globs")
     for runner in runners:
         if not isinstance(runner, dict):
             reasons.append("test_runners entries must be objects")
@@ -178,6 +181,12 @@ def pair_errors(project: dict, record: dict, reader=None) -> list[str]:
         problems.append(f"runner {runner_id}: selector must equal the recorded test_file")
     if record.get("command") != selected_command(runner, record.get("test_file", "")):
         problems.append(f"runner {runner_id}: command or selection differs from approved configuration")
+    test_file = record.get("test_file", "")
+    if runner.get("test_globs") and not match_any(test_file, runner["test_globs"]):
+        problems.append(f"runner {runner_id}: test_file is outside its approved test_globs")
+    project_test_globs = project.get("path_classes", {}).get("tests", [])
+    if project_test_globs and not match_any(test_file, project_test_globs):
+        problems.append(f"runner {runner_id}: test_file is outside path_classes.tests")
     semantics, recorded = runner.get("semantics"), record.get("test_semantics")
     if not semantics:
         problems.append(f"runner {runner_id}: proof needs an approved semantic adapter; dependency impact is unknown")

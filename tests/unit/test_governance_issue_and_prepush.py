@@ -446,6 +446,17 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         code, output = self.push_result(outgoing, self.base)
         self.assertEqual(code, 0, output)
 
+    def test_pre_push_honors_explicit_named_helper_directory(self):
+        self.set_named_runner(["tests/**"])
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        project["test_runners"][0]["test_globs"] = ["tests/helpers/**"]
+        write_json(project_file, project)
+        self.write_named_test("tests/helpers/setup.py", True)
+        outgoing = commit(self.root, "test: add explicitly selected helper suite")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 0, output)
+
     def test_pre_push_does_not_infer_helper_as_test_from_broad_glob(self):
         self.set_project_config(test_command=["python3", "{test_file}"])
         test = self.root / "tests/helper.py"
@@ -467,6 +478,20 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         previous = commit(self.root, "test: add failing unit test")
         (tests / "helper.py").write_text("raise SystemExit(0)\n")
         outgoing = commit(self.root, "test: update helper")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("test tests/failing_unit.py failed", output)
+
+    def test_pre_push_touched_helper_directory_cannot_hide_failing_test(self):
+        self.set_project_config(test_command=["python3", "{test_file}"])
+        tests = self.root / "tests"
+        tests.mkdir(exist_ok=True)
+        (tests / "failing_unit.py").write_text("raise SystemExit(1)\n")
+        previous = commit(self.root, "test: add failing unit test")
+        helper = tests / "helpers/setup.py"
+        helper.parent.mkdir()
+        helper.write_text("raise SystemExit(0)\n")
+        outgoing = commit(self.root, "test: update helper directory")
         code, output = self.push_result(outgoing, previous)
         self.assertEqual(code, 1)
         self.assertIn("test tests/failing_unit.py failed", output)
@@ -628,6 +653,47 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         code, output = self.push_result(outgoing, self.base)
         self.assertEqual(code, 0, output)
 
+    def test_pre_push_source_change_runs_every_affected_runner_suite(self):
+        self.set_named_runner()
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        unit = project["test_runners"][0]
+        unit["test_globs"] = ["tests/unit/**"]
+        browser = dict(unit, id="browser", test_globs=["tests/browser/**"])
+        project["test_runners"] = [unit, browser]
+        write_json(project_file, project)
+        self.write_named_test("tests/unit/check.py", True)
+        self.write_named_test("tests/browser/check.py", False)
+        previous = commit(self.root, "test: establish runner suites")
+        unit_test = self.root / "tests/unit/check.py"
+        unit_test.write_text(unit_test.read_text() + "\n")
+        source = self.root / "src/a.ts"
+        source.parent.mkdir(exist_ok=True)
+        source.write_text("export const a = 2;\n")
+        outgoing = commit(self.root, "fix: change source with unit coverage")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("test runner browser on tests/browser/check.py failed", output)
+
+    def test_pre_push_source_change_rejects_empty_affected_runner_suite(self):
+        self.set_named_runner()
+        project_file = self.root / "docs/_cgspec/project.json"
+        project = json.loads(project_file.read_text())
+        unit = project["test_runners"][0]
+        unit["test_globs"] = ["tests/unit/**"]
+        browser = dict(unit, id="browser", test_globs=["tests/browser/**"], applies_to=["web/**"])
+        project["test_runners"] = [unit, browser]
+        write_json(project_file, project)
+        self.write_named_test("tests/browser/check.py", True)
+        previous = commit(self.root, "test: establish unrelated suite")
+        source = self.root / "src/a.ts"
+        source.parent.mkdir(exist_ok=True)
+        source.write_text("export const a = 2;\n")
+        outgoing = commit(self.root, "fix: change source without runner suite")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("test runner unit selects no test files", output)
+
     def test_pre_push_rejects_ambiguous_multiple_runner_selection(self):
         self.set_named_runner()
         project_file = self.root / "docs/_cgspec/project.json"
@@ -638,7 +704,7 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         outgoing = commit(self.root, "test: add ambiguously routed test")
         code, output = self.push_result(outgoing, self.base)
         self.assertEqual(code, 1)
-        self.assertIn("multiple named test runners must each declare non-empty test_globs", output)
+        self.assertIn("multiple test_runners must each declare non-empty test_globs", output)
 
     def test_pre_push_rejects_runner_without_test_file_selection(self):
         from _lib.local_approval_gate import pre_push

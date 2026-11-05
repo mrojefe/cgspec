@@ -26,11 +26,11 @@ def runner_project() -> dict:
     }]
     project["test_runners"] = [
         {"id": "unit", "adapter": "vitest-json", "command": ["npm", "exec", "--", "vitest", "run", "{test_file}", "--reporter=json", "--outputFile={report}"],
-         "cwd": ".", "selection": "test_file", "test_globs": ["tests/**/*.test.js"],
+         "cwd": ".", "selection": "test_file", "test_globs": ["tests/**/*.test.*"],
          "applies_to": ["src/**"], "environment": "node-tests", "timeout_seconds": 120,
          "isolation": "per-run-worktree", "report": "json", "artifacts": [], "semantics": {"adapter": "command-json-v1", "command": ["node", "tools/semantic-adapter.js", "{test_file}", "{test_id}"], "inputs": ["tools/semantic-adapter.js"]}},
         {"id": "browser", "adapter": "playwright-json", "command": ["npm", "exec", "--", "playwright", "test", "{test_file}", "--reporter=json"],
-         "cwd": ".", "selection": "test_file", "test_globs": ["tests/**/*.spec.js"],
+         "cwd": ".", "selection": "test_file", "test_globs": ["tests/**/*.spec.*"],
          "applies_to": ["src/**"], "environment": "node-tests", "timeout_seconds": 180,
          "isolation": "per-run-worktree", "report": "stdout-json", "artifacts": ["test-results/**"], "semantics": {"adapter": "command-json-v1", "command": ["node", "tools/semantic-adapter.js", "{test_file}", "{test_id}"], "inputs": ["tools/semantic-adapter.js"]}},
     ]
@@ -89,6 +89,12 @@ class NamedRunnerSchemaTests(unittest.TestCase):
         project["test_runners"][1]["command"].remove("{test_file}")
         self.assertTrue(runner_contracts.errors(project))
 
+    def test_multiple_runners_each_need_test_globs(self):
+        project = runner_project()
+        project["test_runners"][1].pop("test_globs")
+        self.assertTrue(validate_named(project, "project"))
+        self.assertTrue(runner_contracts.errors(project))
+
     def test_offline_cache_requires_a_pinned_lockfile_input(self):
         project = runner_project()
         project["test_environments"][0]["network"] = "offline-cache"
@@ -131,6 +137,11 @@ class NamedRunnerSchemaTests(unittest.TestCase):
         changed = copy.deepcopy(record)
         changed["runner_hash"] = "0" * 64
         self.assertTrue(runner_contracts.pair_errors(project, changed))
+        changed = copy.deepcopy(record)
+        changed["test_file"] = changed["selector"] = "tests/login.spec.ts"
+        changed["command"] = runner_contracts.selected_command(runner, changed["test_file"])
+        self.assertIn("outside its approved test_globs",
+                      "; ".join(runner_contracts.pair_errors(project, changed, lambda _: b"adapter")))
 
 
 class NamedRunnerApprovalTests(unittest.TestCase):

@@ -46,17 +46,19 @@ def post_commit(root: Path) -> int:
 
 
 def _find_test_files(root: Path, commits: set[str], test_globs: list[str],
-                     explicit_globs: list[str] | None = None) -> list[str]:
+                     explicit_globs: list[str] | None = None, force_all: bool = False) -> list[str]:
     def candidate(rel: str) -> bool:
         return (not rel.startswith("docs/_cgspec/01-engine/")
                 and match_any(rel, test_globs) and (root / rel).is_file())
 
     def implicit_candidate(rel: str) -> bool:
         excluded = (".", "_", "helper", "conftest")
-        if not Path(rel).name.startswith(excluded):
+        def excluded_part(value: str) -> bool:
+            return any(part.startswith(excluded) for part in value.replace("\\", "/").split("/"))
+        if not excluded_part(rel):
             return True
         selectors = test_globs + (explicit_globs or [])
-        return any(Path(pattern).name.startswith(excluded) and match_any(rel, [pattern])
+        return any(excluded_part(pattern) and match_any(rel, [pattern])
                    for pattern in selectors)
 
     touched: list[str] = []
@@ -66,7 +68,8 @@ def _find_test_files(root: Path, commits: set[str], test_globs: list[str],
             if c.status != "D" and candidate(c.path) and implicit_candidate(c.path):
                 if c.path not in touched:
                     touched.append(c.path)
-    if not touched:
+    if force_all or not touched:
+        touched = []
         tracked = git(root, "ls-files", "-z")
         if tracked.returncode:
             return []
@@ -76,10 +79,19 @@ def _find_test_files(root: Path, commits: set[str], test_globs: list[str],
     return touched
 
 
+def _changed_paths(root: Path, commits: set[str]) -> set[str]:
+    paths = set()
+    for sha in sorted(commits):
+        for change in View.commit(root, sha).changes():
+            paths.update(path for path in (change.path, change.old_path) if path)
+    return paths
+
+
 def _run_test_cmd(root: Path, commits: set[str], test_cmd: list[str], test_globs: list[str]) -> list[str]:
     failures = []
     if "{test_file}" in test_cmd:
-        files = _find_test_files(root, commits, test_globs)
+        force_all = any(not match_any(path, test_globs) for path in _changed_paths(root, commits))
+        files = _find_test_files(root, commits, test_globs, force_all=force_all)
         if not files:
             return ["test command uses {test_file}, but no test files were found"]
         for tf in files:
@@ -109,23 +121,33 @@ def _run_runners(repo: Path, root: Path, revision: str, project: dict,
     if contract_errors:
         return [f"invalid test runner contract: {problem}" for problem in contract_errors]
     runners = project["test_runners"]
-    if len(runners) > 1 and any(not runner.get("test_globs") for runner in runners):
-        return ["multiple named test runners must each declare non-empty test_globs"]
     explicit_globs = [pattern for runner in runners for pattern in runner.get("test_globs", [])]
-    files = _find_test_files(root, commits, test_globs, explicit_globs)
+    changed = _changed_paths(root, commits)
+    policy_changed = "docs/_cgspec/project.json" in changed
+    affected = policy_changed or any(match_any(path, runner["applies_to"])
+                                     for path in changed for runner in runners)
+    files = _find_test_files(root, commits, test_globs, explicit_globs, affected)
     if not files:
         return ["named test runners select no test files from path_classes.tests"]
+    selectors = {runner["id"]: runner.get("test_globs", test_globs) for runner in runners}
     selected = {runner["id"]: [test_file for test_file in files
-                               if match_any(test_file, runner.get("test_globs", test_globs))]
+                               if match_any(test_file, selectors[runner["id"]])]
                 for runner in runners}
     unassigned = [test_file for test_file in files
                   if not any(test_file in runner_files for runner_files in selected.values())]
-    if unassigned:
+    if unassigned and not project.get("test_command"):
         return ["named test runners do not select test files: " + ", ".join(unassigned)]
     for runner in runners:
         environment = next(item for item in project["test_environments"]
                            if item["id"] == runner["environment"])
-        for test_file in selected[runner["id"]]:
+        force_all = policy_changed or any(match_any(path, runner["applies_to"]) for path in changed)
+        runner_files = _find_test_files(root, commits, test_globs, selectors[runner["id"]], force_all)
+        runner_files = [test_file for test_file in runner_files
+                        if match_any(test_file, selectors[runner["id"]])]
+        if force_all and not runner_files:
+            failures.append(f"test runner {runner['id']} selects no test files from path_classes.tests")
+            continue
+        for test_file in runner_files:
             detail = runner_execution.run_detail(repo, revision, runner, environment, test_file)
             if detail["result"] != "PASS":
                 reason = detail.get("reason") or detail["result"]
