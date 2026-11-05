@@ -271,7 +271,12 @@ def check_issue_linking(root: Path, base: str, pr: str | None,
     if not enforce_issue:
         return [], []
     repository = issue_linking.repository(root) or ""
-    references = issue_linking.references(root, commits_in_range(root, base), repository, pr)
+    try:
+        metadata = issue_linking.event_pr_metadata() if is_ci_pr else ""
+    except RuntimeError as exc:
+        return [f"cannot verify issue linking: {exc}"], []
+    references = issue_linking.references(root, commits_in_range(root, base), repository,
+                                          "\n".join(filter(None, (pr, metadata))))
     if not references:
         return ["candidate PR or commit range has no associated issue reference (e.g. closes #<id>, fixes #<id>, or #<id>)"], []
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):

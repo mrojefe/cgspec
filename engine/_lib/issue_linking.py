@@ -60,24 +60,53 @@ def references(root: Path, commits: list[str], repo: str, pr: str | None = None)
     return found
 
 
+def event_pr_metadata() -> str:
+    """Read the actual Actions pull-request payload supplied to the installed workflow."""
+    path = os.environ.get("GITHUB_EVENT_PATH")
+    if not path:
+        raise RuntimeError("GitHub pull_request event payload is unavailable")
+    try:
+        event = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("GitHub pull_request event payload is unreadable") from exc
+    pr = event.get("pull_request") if isinstance(event, dict) else None
+    if not isinstance(pr, dict) or not isinstance(pr.get("title"), str) or not isinstance(pr.get("body"), (str, type(None))):
+        raise RuntimeError("GitHub pull_request event payload has no PR metadata")
+    return "\n".join((pr["title"], pr.get("body") or ""))
+
+
 def existing_issue(target_repo: str, referenced_repo: str, number: int, credential: str) -> bool:
     api = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
-    request = urllib.request.Request(
-        f"{api}/repos/{referenced_repo}/issues/{number}",
-        headers={"Authorization": f"Bearer {credential}", "Accept": "application/vnd.github+json"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            issue = json.load(response)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return False
-        raise RuntimeError(f"GitHub issue lookup returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise RuntimeError(f"GitHub issue lookup unavailable: {type(exc).__name__}") from exc
+    target = _github_json(f"{api}/repos/{target_repo}", credential)
+    if not isinstance(target, dict) or not isinstance(target.get("id"), int):
+        raise RuntimeError("GitHub repository lookup returned an invalid identity")
+    issue = _github_json(f"{api}/repos/{referenced_repo}/issues/{number}", credential)
+    if issue is None:
+        return False
     if not isinstance(issue, dict) or issue.get("number") != number:
         raise RuntimeError("GitHub issue lookup returned an invalid response")
     canonical = issue.get("repository_url")
     if not isinstance(canonical, str):
         raise RuntimeError("GitHub issue lookup omitted the repository identity")
-    return canonical.rstrip("/").casefold().endswith(f"/repos/{target_repo}".casefold()) and "pull_request" not in issue
+    issue_repo = canonical.rstrip("/").rsplit("/repos/", 1)
+    if len(issue_repo) != 2:
+        raise RuntimeError("GitHub issue lookup returned an invalid repository identity")
+    referenced = _github_json(f"{api}/repos/{issue_repo[1]}", credential)
+    if not isinstance(referenced, dict) or not isinstance(referenced.get("id"), int):
+        raise RuntimeError("GitHub repository lookup returned an invalid identity")
+    return target["id"] == referenced["id"] and "pull_request" not in issue
+
+
+def _github_json(url: str, credential: str) -> dict | None:
+    request = urllib.request.Request(url, headers={
+        "Authorization": f"Bearer {credential}", "Accept": "application/vnd.github+json",
+    })
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise RuntimeError(f"GitHub issue lookup returned HTTP {exc.code}") from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise RuntimeError(f"GitHub issue lookup unavailable: {type(exc).__name__}") from exc

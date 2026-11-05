@@ -31,10 +31,19 @@ class IssueLinkingGateTests(unittest.TestCase):
         self.base = head(self.root)
         self._saved_env = {key: os.environ.get(key) for key in
                            ("GITHUB_REPOSITORY", "GITHUB_WORKSPACE", "GITHUB_EVENT_NAME",
-                            "GITHUB_API_URL", "GH_TOKEN", "GITHUB_TOKEN")}
+                            "GITHUB_API_URL", "GITHUB_EVENT_PATH", "GH_TOKEN", "GITHUB_TOKEN")}
 
         class IssueHandler(BaseHTTPRequestHandler):
             def do_GET(self):
+                if self.path in ("/repos/BeOjefe/cgspec", "/repos/mrojefe/cgspec", "/repos/other/cgspec"):
+                    repo = self.path.removeprefix("/repos/")
+                    payload = json.dumps({"id": 2 if repo == "other/cgspec" else 1,
+                                          "full_name": "other/cgspec" if repo == "other/cgspec" else "mrojefe/cgspec"}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 number = self.path.rsplit("/", 1)[-1]
                 repo = self.path.removeprefix("/repos/").rsplit("/issues/", 1)[0]
                 if repo in ("BeOjefe/cgspec", "mrojefe/cgspec", "other/cgspec") and number in ("76", "77"):
@@ -63,6 +72,7 @@ class IssueLinkingGateTests(unittest.TestCase):
                            "GITHUB_API_URL": f"http://127.0.0.1:{self._server.server_port}",
                            "GH_TOKEN": "fixture-token"})
         os.environ.pop("GITHUB_TOKEN", None)
+        os.environ.pop("GITHUB_EVENT_PATH", None)
 
     def tearDown(self):
         self._server.shutdown()
@@ -106,6 +116,40 @@ class IssueLinkingGateTests(unittest.TestCase):
         res = self.ci("--pr", "https://github.com/BeOjefe/cgspec/issues/76")
         self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
         self.assertIn("verified PR-to-issue reference", res.stdout)
+
+    def test_repository_aliases_work_in_both_directions(self):
+        from _lib.issue_linking import existing_issue
+        self.assertTrue(existing_issue("BeOjefe/cgspec", "mrojefe/cgspec", 76, "fixture-token"))
+        self.assertTrue(existing_issue("mrojefe/cgspec", "BeOjefe/cgspec", 76, "fixture-token"))
+        self.assertFalse(existing_issue("BeOjefe/cgspec", "other/cgspec", 76, "fixture-token"))
+        os.environ["GITHUB_REPOSITORY"] = "BeOjefe/cgspec"
+        self.set_t0()
+        (self.root / "src/a.ts").write_text("export const a = 2;\n")
+        commit(self.root, "fix: update logic")
+        res = self.ci("--pr", "https://github.com/mrojefe/cgspec/issues/76")
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+
+    def test_installed_ci_reads_actual_pr_body_without_cli_flag(self):
+        self.set_t0()
+        (self.root / "src/a.ts").write_text("export const a = 2;\n")
+        commit(self.root, "fix: update logic")
+        event = self.root / "pr-event.json"
+        event.write_text(json.dumps({"pull_request": {"title": "Update logic", "body": "Closes #76"}}))
+        os.environ["GITHUB_EVENT_NAME"] = "pull_request"
+        os.environ["GITHUB_EVENT_PATH"] = str(event)
+        res = self.ci()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("verified PR-to-issue reference", res.stdout)
+
+    def test_installed_ci_rejects_unreadable_pr_event(self):
+        self.set_t0()
+        (self.root / "src/a.ts").write_text("export const a = 2;\n")
+        commit(self.root, "fix: update logic")
+        os.environ["GITHUB_EVENT_NAME"] = "pull_request"
+        os.environ["GITHUB_EVENT_PATH"] = str(self.root / "missing-event.json")
+        res = self.ci()
+        self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
+        self.assertIn("GitHub pull_request event payload is unreadable", res.stdout)
 
     def test_commit_message_with_closes_issue_passes_governance_gate(self):
         self.set_t0()
@@ -237,6 +281,9 @@ class IssueLinkingGateTests(unittest.TestCase):
         commit(self.root, "fix: unlinked pr commit")
         os.environ["GITHUB_EVENT_NAME"] = "pull_request"
         os.environ["GITHUB_WORKSPACE"] = str(self.root)
+        event = self.root / "pr-event.json"
+        event.write_text(json.dumps({"pull_request": {"title": "Unlinked update", "body": "No issue link"}}))
+        os.environ["GITHUB_EVENT_PATH"] = str(event)
         try:
             res = self.ci()
             self.assertEqual(res.returncode, 1, res.stdout + res.stderr)
@@ -244,6 +291,7 @@ class IssueLinkingGateTests(unittest.TestCase):
         finally:
             os.environ.pop("GITHUB_EVENT_NAME", None)
             os.environ.pop("GITHUB_WORKSPACE", None)
+            os.environ.pop("GITHUB_EVENT_PATH", None)
 
     def test_unconfigured_without_pr_flag_preserves_legacy_behavior(self):
         self.set_t0()
@@ -270,6 +318,36 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         data = json.loads(pj.read_text())
         data.update(kwargs)
         pj.write_text(json.dumps(data, indent=2) + "\n")
+
+    def set_named_runner(self, test_globs=None):
+        from _lib.schema import validate_named
+        project = json.loads((self.root / "docs/_cgspec/project.json").read_text())
+        project["path_classes"]["tests"] = test_globs or ["tests/**"]
+        project.pop("test_command", None)
+        project["test_environments"] = [{
+            "id": "python", "cwd": ".", "setup": ["python3", "-c", "pass"],
+            "readiness": ["python3", "--version"], "inputs": [],
+            "network": "online", "timeout_seconds": 30,
+        }]
+        project["test_runners"] = [{
+            "id": "unit", "adapter": "cgspec-json", "command": ["python3", "{test_file}", "{report}"],
+            "cwd": ".", "selection": "test_file", "applies_to": ["src/**"],
+            "environment": "python", "timeout_seconds": 30, "isolation": "per-run-worktree",
+            "report": "json", "artifacts": [],
+        }]
+        self.assertEqual(validate_named(project, "project"), [])
+        write_json(self.root / "docs/_cgspec/project.json", project)
+
+    def write_named_test(self, path: str, passes: bool):
+        test = self.root / path
+        test.parent.mkdir(parents=True, exist_ok=True)
+        test.write_text(
+            "import json, pathlib, sys\n"
+            f"ok = {passes!r}\n"
+            f"pathlib.Path(sys.argv[1]).write_text(json.dumps({{'selector': {path!r}, "
+            "'assertions': {'passed': int(ok), 'failed': int(not ok)}, "
+            "'infrastructure': {'status': 'ok'}}))\n"
+            "raise SystemExit(0 if ok else 1)\n")
 
     def test_pre_push_blocks_when_configured_test_command_fails(self):
         from _lib.local_approval_gate import pre_push
@@ -305,6 +383,38 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         ref_update = f"refs/heads/codex/test-work {fixed_head} refs/heads/codex/test-work {self.base}\n"
         self.assertEqual(pre_push(self.root, ref_update), 0)
 
+    def test_pre_push_ignores_uncommitted_test_repair(self):
+        from _lib.local_approval_gate import pre_push
+        self.set_project_config(test_command=["python3", "{test_file}"])
+        (self.root / "tests").mkdir(exist_ok=True)
+        test = self.root / "tests/failing_unit.py"
+        test.write_text("raise SystemExit(1)\n")
+        failing = commit(self.root, "test: committed failure")
+        test.write_text("raise SystemExit(0)\n")
+        ref_update = f"refs/heads/codex/test-work {failing} refs/heads/codex/test-work {self.base}\n"
+        self.assertEqual(pre_push(self.root, ref_update), 1)
+        self.assertEqual(test.read_text(), "raise SystemExit(0)\n")
+
+    def test_pre_push_uses_outgoing_ref_even_when_head_is_fixed(self):
+        from _lib.local_approval_gate import pre_push
+        self.set_project_config(test_command=["python3", "{test_file}"])
+        (self.root / "tests").mkdir(exist_ok=True)
+        test = self.root / "tests/failing_unit.py"
+        test.write_text("raise SystemExit(1)\n")
+        failing = commit(self.root, "test: committed failure")
+        test.write_text("raise SystemExit(0)\n")
+        commit(self.root, "test: fixed on HEAD only")
+        ref_update = f"refs/heads/codex/older {failing} refs/heads/codex/older {self.base}\n"
+        self.assertEqual(pre_push(self.root, ref_update), 1)
+
+    def test_pre_push_ignores_uncommitted_config_repair(self):
+        from _lib.local_approval_gate import pre_push
+        self.set_project_config(test_command=["python3", "-c", "raise SystemExit(1)"])
+        failing = commit(self.root, "config: committed failing test command")
+        self.set_project_config(test_command=["python3", "-c", "raise SystemExit(0)"])
+        ref_update = f"refs/heads/codex/test-work {failing} refs/heads/codex/test-work {self.base}\n"
+        self.assertEqual(pre_push(self.root, ref_update), 1)
+
     def test_pre_push_ref_deletion_skips_tests(self):
         from _lib.local_approval_gate import pre_push
         self.set_project_config(test_command=["python3", "-c", "import sys; sys.exit(1)"])
@@ -334,20 +444,14 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
 
     def test_pre_push_blocks_when_test_file_runner_selects_none(self):
         from _lib.local_approval_gate import pre_push
-        self.set_project_config(test_command=None, test_runners=[{
-            "id": "unit", "command": ["python3", "{test_file}"],
-            "cwd": ".", "timeout_seconds": 30, "applies_to": ["tests/**"],
-        }])
+        self.set_named_runner()
         current_head = commit(self.root, "docs: outgoing work")
         ref_update = f"refs/heads/codex/test-work {current_head} refs/heads/codex/test-work {self.base}\n"
         self.assertEqual(pre_push(self.root, ref_update), 1)
 
     def test_pre_push_runner_does_not_select_unrelated_test_files(self):
         from _lib.local_approval_gate import pre_push
-        self.set_project_config(test_command=None, test_runners=[{
-            "id": "unit", "command": ["python3", "{test_file}"],
-            "cwd": ".", "timeout_seconds": 30, "applies_to": ["tests/unit/**"],
-        }])
+        self.set_named_runner(["tests/unit/**"])
         (self.root / "tests").mkdir(exist_ok=True)
         (self.root / "tests/unrelated.py").write_text("pass\n")
         current_head = commit(self.root, "test: unrelated test")
@@ -356,39 +460,28 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
 
     def test_pre_push_executes_test_runners_with_test_file_substitution(self):
         from _lib.local_approval_gate import pre_push
-        runner = {
-            "id": "unit",
-            "command": ["python3", "{test_file}"],
-            "cwd": ".",
-            "timeout_seconds": 30,
-            "applies_to": ["tests/**"],
-        }
-        self.set_project_config(test_command=None, test_runners=[runner])
-        (self.root / "tests").mkdir(exist_ok=True)
-        (self.root / "tests/failing_runner.py").write_text("import sys\nsys.exit(1)\n")
+        self.set_named_runner()
+        self.write_named_test("tests/failing_runner.py", False)
         current_head = commit(self.root, "test: add failing runner test")
         ref_update = f"refs/heads/codex/test-work {current_head} refs/heads/codex/test-work {self.base}\n"
         self.assertEqual(pre_push(self.root, ref_update), 1)
 
-        (self.root / "tests/failing_runner.py").write_text("import sys\nsys.exit(0)\n")
+        self.write_named_test("tests/failing_runner.py", True)
         fixed_head = commit(self.root, "test: fix runner test")
         ref_update = f"refs/heads/codex/test-work {fixed_head} refs/heads/codex/test-work {self.base}\n"
         self.assertEqual(pre_push(self.root, ref_update), 0)
 
-    def test_pre_push_executes_test_runners_without_test_file(self):
+    def test_pre_push_rejects_runner_without_test_file_selection(self):
         from _lib.local_approval_gate import pre_push
-        runner = {
-            "id": "suite",
-            "command": ["python3", "-c", "import sys; sys.exit(0)"],
-            "cwd": ".",
-            "timeout_seconds": 30,
-        }
-        self.set_project_config(test_command=None, test_runners=[runner])
+        self.set_named_runner()
+        project = json.loads((self.root / "docs/_cgspec/project.json").read_text())
+        project["test_runners"][0]["command"] = ["python3", "-c", "pass"]
+        write_json(self.root / "docs/_cgspec/project.json", project)
         agents_file = self.root / "AGENTS.md"
         agents_file.write_text(agents_file.read_text() + "\n<!-- push work -->\n")
         current_head = commit(self.root, "docs: outgoing work")
         ref_update = f"refs/heads/codex/test-work {current_head} refs/heads/codex/test-work {self.base}\n"
-        self.assertEqual(pre_push(self.root, ref_update), 0)
+        self.assertEqual(pre_push(self.root, ref_update), 1)
 
     def test_git_pre_push_event_alias(self):
         self.set_project_config(test_command=["python3", "-c", "import sys; sys.exit(0)"])

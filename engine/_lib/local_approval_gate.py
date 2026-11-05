@@ -8,13 +8,13 @@ intermediate commits, against that commit's own parent policy.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
-import sys
+import tempfile
 from pathlib import Path
 
 from . import commit_trust as trust
+from . import runner_contracts, runner_execution
 from .common import EXIT_FAIL, EXIT_OK
 from .gitview import View, git
 from .globs import match_any
@@ -92,44 +92,42 @@ def _run_test_cmd(root: Path, commits: set[str], test_cmd: list[str], test_globs
     return failures
 
 
-def _run_runners(root: Path, test_runners: list, commits: set[str], test_globs: list[str]) -> list[str]:
+def _run_runners(repo: Path, root: Path, revision: str, project: dict,
+                 commits: set[str], test_globs: list[str]) -> list[str]:
     failures = []
-    for runner in test_runners:
-        if not isinstance(runner, dict):
-            continue
-        cmd = runner.get("command")
-        if not (isinstance(cmd, list) and cmd):
-            continue
-        runner_cwd = root / runner.get("cwd", ".")
-        timeout = runner.get("timeout_seconds", 300)
-        runner_id = runner.get("id", "default")
-        globs = runner.get("applies_to") if isinstance(runner.get("applies_to"), list) else test_globs
-
-        if "{test_file}" in cmd:
-            files = _find_test_files(root, commits, globs)
-            if not files:
-                failures.append(f"test runner {runner_id} uses {{test_file}}, but no test files were found")
-            for tf in files:
-                sub_cmd = [tf if part == "{test_file}" else part for part in cmd]
-                try:
-                    res = subprocess.run(sub_cmd, cwd=runner_cwd, capture_output=True, text=True, timeout=timeout)
-                    if res.returncode != 0:
-                        detail = (res.stderr or res.stdout or "").strip()
-                        failures.append(f"test runner {runner_id} on {tf} failed (exit {res.returncode}): {detail}" if detail else f"test runner {runner_id} on {tf} failed (exit {res.returncode})")
-                except Exception as exc:
-                    failures.append(f"could not run test runner {runner_id} on {tf} ({sub_cmd}): {exc}")
-        else:
-            try:
-                res = subprocess.run(cmd, cwd=runner_cwd, capture_output=True, text=True, timeout=timeout)
-                if res.returncode != 0:
-                    detail = (res.stderr or res.stdout or "").strip()
-                    failures.append(f"test runner {runner_id} failed (exit {res.returncode}): {detail}" if detail else f"test runner {runner_id} failed (exit {res.returncode})")
-            except Exception as exc:
-                failures.append(f"could not run test runner {runner_id} ({cmd}): {exc}")
+    contract_errors = runner_contracts.errors(project)
+    if contract_errors:
+        return [f"invalid test runner contract: {problem}" for problem in contract_errors]
+    files = _find_test_files(root, commits, test_globs)
+    if not files:
+        return ["named test runners select no test files from path_classes.tests"]
+    for runner in project["test_runners"]:
+        environment = next(item for item in project["test_environments"]
+                           if item["id"] == runner["environment"])
+        for test_file in files:
+            detail = runner_execution.run_detail(repo, revision, runner, environment, test_file)
+            if detail["result"] != "PASS":
+                reason = detail.get("reason") or detail["result"]
+                failures.append(f"test runner {runner['id']} on {test_file} failed: {reason}")
     return failures
 
 
-def run_pre_push_tests(root: Path, commits: set[str]) -> list[str]:
+def _run_at_revision(repo: Path, revision: str, commits: set[str]) -> list[str]:
+    with tempfile.TemporaryDirectory(prefix="cgspec-pre-push-") as directory:
+        tree = Path(directory) / "tree"
+        result = git(repo, "worktree", "add", "--detach", "-q", str(tree), revision)
+        if result.returncode:
+            return [f"cannot check out outgoing revision {revision[:12]} for pre-push tests"]
+        try:
+            failures = run_pre_push_tests(repo, tree, revision, commits)
+        finally:
+            removed = git(repo, "worktree", "remove", "--force", str(tree))
+        if removed.returncode:
+            failures.append(f"cannot remove pre-push test worktree for {revision[:12]}")
+        return failures
+
+
+def run_pre_push_tests(repo: Path, root: Path, revision: str, commits: set[str]) -> list[str]:
     pj_file = root / "docs" / "_cgspec" / "project.json"
     if not pj_file.exists():
         return []
@@ -153,13 +151,13 @@ def run_pre_push_tests(root: Path, commits: set[str]) -> list[str]:
     if isinstance(test_cmd, list) and test_cmd:
         failures.extend(_run_test_cmd(root, commits, test_cmd, test_globs))
     elif isinstance(test_runners, list) and test_runners:
-        failures.extend(_run_runners(root, test_runners, commits, test_globs))
+        failures.extend(_run_runners(repo, root, revision, project, commits, test_globs))
 
     return failures
 
 
 def pre_push(root: Path, raw: str) -> int:
-    commits, reasons = set(), []
+    commits, reasons, outgoing = set(), [], {}
     for line in raw.splitlines():
         fields = line.split()
         if len(fields) != 4 or any(not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", fields[i]) for i in (1, 3)):
@@ -175,6 +173,7 @@ def pre_push(root: Path, raw: str) -> int:
         if result.returncode:
             reasons.append("cannot establish outgoing commit range; fetch the remote history and retry")
             continue
+        outgoing.setdefault(local, set()).update(result.stdout.splitlines())
         commits.update(result.stdout.splitlines())
     for sha in sorted(commits):
         view = View.commit(root, sha)
@@ -187,7 +186,10 @@ def pre_push(root: Path, raw: str) -> int:
         print("CGSpec local approval check failed (push blocked):\n- " + "\n- ".join(reasons))
         return EXIT_FAIL
     if commits:
-        test_failures = run_pre_push_tests(root, commits)
+        test_failures = []
+        for revision, revision_commits in outgoing.items():
+            if revision_commits:
+                test_failures.extend(_run_at_revision(root, revision, revision_commits))
         if test_failures:
             print("CGSpec pre-push test run failed (push blocked):\n- " + "\n- ".join(test_failures))
             return EXIT_FAIL
