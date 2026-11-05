@@ -47,10 +47,15 @@ def post_commit(root: Path) -> int:
 
 def _find_test_files(root: Path, commits: set[str], test_globs: list[str]) -> list[str]:
     def candidate(rel: str) -> bool:
-        name = Path(rel).name
         return (not rel.startswith("docs/_cgspec/01-engine/")
-                and not name.startswith((".", "_", "helper", "conftest"))
                 and match_any(rel, test_globs) and (root / rel).is_file())
+
+    def implicit_candidate(rel: str) -> bool:
+        excluded = (".", "_", "helper", "conftest")
+        if not Path(rel).name.startswith(excluded):
+            return True
+        return any(Path(pattern).name.startswith(excluded) and match_any(rel, [pattern])
+                   for pattern in test_globs)
 
     touched: list[str] = []
     for sha in sorted(commits):
@@ -64,7 +69,7 @@ def _find_test_files(root: Path, commits: set[str], test_globs: list[str]) -> li
         if tracked.returncode:
             return []
         for rel in sorted(filter(None, tracked.stdout.split("\0"))):
-            if candidate(rel):
+            if candidate(rel) and implicit_candidate(rel):
                 touched.append(rel)
     return touched
 

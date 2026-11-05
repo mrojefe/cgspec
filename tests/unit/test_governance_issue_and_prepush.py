@@ -419,6 +419,46 @@ class PrePushTestExecutionGateTests(unittest.TestCase):
         code, output = self.push_result(outgoing, previous)
         self.assertEqual(code, 0, output)
 
+    def test_pre_push_honors_explicit_underscored_test_after_change_and_fallback(self):
+        from _lib.schema import validate_named
+        project = self.root / "docs/_cgspec/project.json"
+        data = json.loads(project.read_text())
+        data["path_classes"]["tests"] = ["tests/_smoke.py"]
+        data["test_command"] = ["python3", "{test_file}"]
+        self.assertEqual(validate_named(data, "project"), [])
+        write_json(project, data)
+        test = self.root / "tests/_smoke.py"
+        test.parent.mkdir(exist_ok=True)
+        test.write_text("raise SystemExit(0)\n")
+        changed = commit(self.root, "test: add explicit smoke test")
+        code, output = self.push_result(changed, self.base)
+        self.assertEqual(code, 0, output)
+        agents_file = self.root / "AGENTS.md"
+        agents_file.write_text(agents_file.read_text() + "\n<!-- docs only -->\n")
+        outgoing = commit(self.root, "docs: update instructions")
+        code, output = self.push_result(outgoing, changed)
+        self.assertEqual(code, 0, output)
+
+    def test_pre_push_honors_explicit_underscored_named_runner_test(self):
+        self.set_named_runner(["tests/_smoke.py"])
+        self.write_named_test("tests/_smoke.py", True)
+        outgoing = commit(self.root, "test: add explicit named smoke test")
+        code, output = self.push_result(outgoing, self.base)
+        self.assertEqual(code, 0, output)
+
+    def test_pre_push_does_not_infer_helper_as_test_from_broad_glob(self):
+        self.set_project_config(test_command=["python3", "{test_file}"])
+        test = self.root / "tests/helper.py"
+        test.parent.mkdir(exist_ok=True)
+        test.write_text("raise SystemExit(0)\n")
+        previous = commit(self.root, "test: add helper")
+        agents_file = self.root / "AGENTS.md"
+        agents_file.write_text(agents_file.read_text() + "\n<!-- docs only -->\n")
+        outgoing = commit(self.root, "docs: update instructions")
+        code, output = self.push_result(outgoing, previous)
+        self.assertEqual(code, 1)
+        self.assertIn("no test files were found", output)
+
     def test_pre_push_rejects_malformed_outgoing_project_json(self):
         project = self.root / "docs/_cgspec/project.json"
         project.write_text("{invalid json\n")
