@@ -58,20 +58,23 @@ class StatusLineWriterTests(unittest.TestCase):
             self.assertTrue(quota_statusline.update(root, payload(requests=3, session="a"), cache_root=cache, now=NOW))
             self.assertTrue(quota_statusline.update(root, payload(requests=1, session="b"), cache_root=cache, now=NOW))
 
-    def test_fail_closed_rows_write_nothing_and_never_raise(self):
+    def test_invalid_payloads_or_no_usable_window_write_nothing_and_never_raise(self):
         invalid = [
             None,
             {},
             {"session_id": "s", "prompt_cache": {"requests": 1}},
             payload(requests=True),
-            payload(five=-1),
-            payload(weekly=101),
-            payload(five=float("nan")),
         ]
-        invalid.append(payload())
-        invalid[-1]["rate_limits"]["five_hour"]["resets_at"] = "tomorrow"
-        invalid.append(payload())
-        invalid[-1]["rate_limits"]["seven_day"].pop("resets_at")
+        for source, window in (
+            ("five_hour", {"used_percentage": -1, "resets_at": 1793901600}),
+            ("seven_day", {"used_percentage": 101, "resets_at": 1794506400}),
+            ("five_hour", {"used_percentage": float("nan"), "resets_at": 1793901600}),
+            ("five_hour", {"used_percentage": 20, "resets_at": "tomorrow"}),
+            ("seven_day", {"used_percentage": 20}),
+        ):
+            broken = payload()
+            broken["rate_limits"] = {source: window}
+            invalid.append(broken)
         invalid.append(payload())
         invalid[-1]["rate_limits"] = {}
         for index, value in enumerate(invalid):
@@ -88,6 +91,16 @@ class StatusLineWriterTests(unittest.TestCase):
             self.assertNotIn("five_hour", data)
             from _lib.quota import evaluate
             self.assertEqual(evaluate(data, now=NOW)["mode"], "bounded")
+
+    def test_expired_window_does_not_hide_another_windows_emergency(self):
+        with TempDir() as root, TempDir() as cache:
+            mixed = payload(weekly=97)
+            mixed["rate_limits"]["five_hour"]["resets_at"] = int(NOW.timestamp())
+            self.assertTrue(quota_statusline.update(root, mixed, cache_root=cache, now=NOW))
+            data = json.loads((root / "docs/_cgspec/07-state/quota.json").read_text())
+            self.assertNotIn("five_hour", data)
+            from _lib.quota import evaluate
+            self.assertEqual(evaluate(data, now=NOW)["mode"], "emergency")
 
     def test_cli_malformed_input_and_unwritable_root_exit_zero(self):
         with TempDir() as root, TempDir() as cache:

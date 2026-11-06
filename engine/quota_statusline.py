@@ -92,7 +92,10 @@ def _reading(payload: object, now: datetime) -> tuple[str, int, dict]:
     mapped = (("five_hour", "five_hour"), ("seven_day", "weekly"))
     for source, target in mapped:
         if source in limits:
-            reading[target] = _window(limits[source], now)
+            try:
+                reading[target] = _window(limits[source], now)
+            except (ValueError, OverflowError, OSError):
+                continue
     if not any(name in reading for name in ("five_hour", "weekly")):
         raise ValueError("no usable quota window")
     return session_id, requests, reading
