@@ -27,6 +27,7 @@ from _lib.common import (  # noqa: E402
 from _lib.adapters import refresh as refresh_adapters, unwire, wire  # noqa: E402
 from _lib.document_dates import stamp_new  # noqa: E402
 from _lib.layout import GUI_PROFILES  # noqa: E402
+from _lib import quota_install  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 PLUGIN_SOURCE = "https://github.com/BeOjefe/cgspec.git"
@@ -34,7 +35,6 @@ OWNED = ENGINE_DIR / "owned-files.json"
 MANIFEST = ENGINE_DIR / "manifest.json"
 ARCHIVE = Path("docs/_cgspec/_archive/pre-cgspec")
 REPLACEABLE = {"AGENTS.md", "CLAUDE.md"}
-GITIGNORE_LINES = [".cgspec-scratch/", "docs/.memlog.lock", "__pycache__/", "*.pyc"]
 SKIP_NAMES = {"__pycache__", ".pytest_cache", "owned-files.json", "manifest.json"}
 
 PATH_CLASSES = {
@@ -155,22 +155,6 @@ def place_templates(root: Path, profile: str, topology: str, owned: dict) -> Non
         place_file(root, rel, src, owned)
 
 
-def update_gitignore(root: Path, owned: dict) -> None:
-    gitignore = safe_target(root, ".gitignore")
-    text = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
-    added = [line for line in GITIGNORE_LINES if line not in text.splitlines()]
-    if not added:
-        return
-    if text and not text.endswith("\n"):
-        text += "\n"
-    if not gitignore.exists():
-        owned["created"][".gitignore"] = ""
-    gitignore.write_text(text + "\n".join(added) + "\n", encoding="utf-8")
-    owned["gitignore_added"] = sorted(set(owned.get("gitignore_added", [])) | set(added))
-    if ".gitignore" in owned["created"]:
-        owned["created"][".gitignore"] = sha256_file(gitignore)
-
-
 def new_owned() -> dict:
     return {"schema": 1, "cgspec_version": version(), "installed_at": utc_now(),
             "created": {}, "dirs": [], "replaced": {}, "deleted": {}, "gitignore_added": []}
@@ -193,7 +177,9 @@ def cmd_install(root: Path, args: argparse.Namespace) -> int:
     if not (root / ENGINE_DIR).exists():
         owned["dirs"].append(ENGINE_DIR.as_posix())
     copy_engine(root)
-    update_gitignore(root, owned)
+    quota_note = quota_install.prepare(root, owned, safe_target)
+    if quota_note:
+        print(quota_note)
     tools = sorted(set(args.tools.split(",")) - {""})
     for note in wire(root, tools, owned, args.profile):
         print(note)
@@ -268,7 +254,9 @@ def cmd_upgrade(root: Path, args: argparse.Namespace) -> int:
     copy_engine(root)
     for note in refresh_adapters(root, owned):
         print(note)
-    update_gitignore(root, owned)
+    quota_note = quota_install.prepare(root, owned, safe_target)
+    if quota_note:
+        print(quota_note)
     owned["cgspec_version"] = version()
     write_json(root / OWNED, owned)
     project["cgspec_version"] = version()  # the version marker is updated last (spec 5)

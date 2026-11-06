@@ -1,5 +1,5 @@
 # CGSpec engine: file formats and hook contract
-Created: unknown · Last edited: 2026-10-29T22:56:36Z
+Created: unknown · Last edited: 2026-11-05T00:00:00Z
 
 This file is the contract between the engine scripts, the hooks and the agent. The JSON
 Schemas in `schemas/` are the machine-checked source; this page explains them. Spec section
@@ -194,7 +194,7 @@ Human-readable CGSpec Markdown documents (except the append-only inbox and ledge
 | `docs/_cgspec/04-checks/manifest.json` | `checks-manifest` | registration flow | Append-only for the same reason. A check runs as a gate only when listed here with a matching hash. Written only by `cgspec_hook.py check register` (script and optional Markdown guide must be regular files under `.cgspec-scratch/checks/`). Optional `guide` and `guide_sha256` pin the approved fix guidance beside the script; a missing or changed guide blocks execution. |
 | `docs/_cgspec/07-state/checkpoint.json` | `checkpoint` | main agent via checkpoint command | `in_flight` is written before each batch and cleared after; clearing it is not project completion. Optional source observations and unresolved-stop diagnostics support recovery. |
 | `docs/_cgspec/07-state/budget.json` | `budget` | hooks | Counts helpers, review rounds and research passes against limits. |
-| `docs/_cgspec/07-state/quota.json` | `quota` | Host quota adapter; no collector/writer is included in this checkout | `quota.py --root <project> [--json]` and session packs validate freshness (five minutes), windows and thresholds. Missing or invalid readings give bounded advice; the command does not collect usage or enforce a task gate (spec 9). |
+| `docs/_cgspec/07-state/quota.json` | `quota` | Claude Code `quota_statusline.py`; manual writers remain allowed | The host-driven writer maps documented five-hour and seven-day windows, converts reset epochs to ISO 8601 and advances `read_at` only with a higher main-session request counter. `quota.py --root <project> [--json]` and session packs validate freshness (five minutes), windows and thresholds. Missing or invalid readings give bounded advice; the read command does not collect usage or enforce a task gate (spec 9). The volatile file is ignored by Git. |
 | `docs/_cgspec/06-evidence/tests/<test-id>.json` | `test-pair` | slice workflow | `failed_at` is the commit where the test failed. Unchanged legacy `test_command` proof replays exit codes and is labelled `legacy exit-code-only proof`; it does not meet the new strict assertion-aware contract. A new named proof additionally records `runner_id`, `runner_hash`, and `selector`; CI re-runs the approved runner at both revisions and checks structured assertion results. |
 | `docs/_cgspec/06-evidence/seals/<seal-id>.json` | `proof-seal` | protected CI signing job | Immutable signed pre-integration proof. Trust is resolved at `reviewed_base`; candidate-added signers cannot authorize it. |
 | `docs/_cgspec/06-evidence/integrations/<map-id>.json` | `proof-map` | protected CI signing job | Immutable signed envelope around the integrated parent. Changed sealed content requires an exact mapping and signed revalidation seal. |

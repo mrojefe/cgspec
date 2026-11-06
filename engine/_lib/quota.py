@@ -37,6 +37,17 @@ def _window(data: dict | None, now: datetime) -> tuple[float | None, str]:
     return 100 - used, ""
 
 
+def _age_text(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
 def evaluate(data, *, now: datetime | None = None) -> dict:
     """Return safety advice, not a provider-enforced task gate or quota measurement."""
     result = {"mode": "bounded", "reason": "no valid quota reading available",
@@ -52,7 +63,8 @@ def evaluate(data, *, now: datetime | None = None) -> dict:
     try:
         age = (now - _time(data["read_at"])).total_seconds()
         if age < 0 or age > MAX_AGE_SECONDS:
-            result["reason"] = "future quota timestamp" if age < 0 else "stale quota reading"
+            result["reason"] = ("future quota timestamp" if age < 0 else
+                                f"stale quota reading ({_age_text(age)} old)")
             return result
     except (ValueError, TypeError, AttributeError, OverflowError):
         result["reason"] = "invalid quota timestamp or window"

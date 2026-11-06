@@ -31,7 +31,7 @@ def last_ledger(root: Path, count: int = 5) -> list[str]:
     return heads[-count:]
 
 
-def pack(root: Path, doctor_summary: str) -> str:
+def pack(root: Path, doctor_summary: str, tool: str = "") -> str:
     cp, recovery = context(root)
     tier = _load(root, STATE_DIR / "tier.json").get("active")
     lines = ["CGSpec session pack (read docs/_cgspec/01-engine/CONTRACT.md before acting)",
@@ -51,7 +51,11 @@ def pack(root: Path, doctor_summary: str) -> str:
     if cp.get("open_issues"):
         lines.append("open issues: " + "; ".join(cp["open_issues"]))
     lines += recovery
-    lines.append(summary(snapshot(root)))
+    quota_result = snapshot(root)
+    lines.append(summary(quota_result))
+    if tool == "claude":
+        from .quota_notice import claude_supervision
+        lines.append(claude_supervision(root, quota_result))
     lines.append("recent ledger:")
     lines += [f"  {l}" for l in last_ledger(root)] or ["  (empty)"]
     lines.append(f"doctor: {doctor_summary}")
