@@ -46,15 +46,26 @@ class Entry:
 def parse(text: str) -> list[Entry]:
     matches = list(HEADER_LINE.finditer(text))
     entries = []
+
+    current_line = 1
+    current_pos = 0
+
     for index, match in enumerate(matches):
+        start = match.start()
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         fields = FULL_HEADER.match(match.group(2))
+
+        # Performance optimization: Count lines incrementally rather than from the
+        # beginning of the file to avoid an O(N^2) time complexity bottleneck.
+        current_line += text.count("\n", current_pos, start)
+        current_pos = start
+
         entries.append(Entry(
             id=match.group(1).strip(),
-            line=text.count("\n", 0, match.start()) + 1,
+            line=current_line,
             header_ok=bool(fields) and bool(VALID_ID.match(match.group(1).strip())),
             tags=[t.strip() for t in fields.group(2).split(",") if t.strip()] if fields else [],
-            text=text[match.start():end].rstrip("\n") + "\n",
+            text=text[start:end].rstrip("\n") + "\n",
         ))
     return entries
 
